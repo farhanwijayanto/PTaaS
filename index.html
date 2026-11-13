@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en" data-theme="dark" suppressHydrationWarning>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>PTaaS Cloud</title>
+
+  <!-- Apply saved theme / sidebar state before first paint to avoid a flash -->
+  <script>
+    (function() {
+      try {
+        var d = document.documentElement;
+        var mode = localStorage.getItem('ptaas.theme') || 'system';
+        var resolved = mode === 'system'
+          ? (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+          : (mode === 'light' ? 'light' : 'dark');
+        d.dataset.theme = resolved;
+        d.style.colorScheme = resolved;
+        d.lang = localStorage.getItem('ptaas.lang') || 'en';
+        if (localStorage.getItem('ptaas.sidebar') === 'collapsed') d.dataset.sb = 'collapsed';
+      } catch (e) {}
+    })();
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="/src/lib/xterm/xterm.css">
+  <link rel="stylesheet" href="/src/styles/tokens.css">
+  <link rel="stylesheet" href="/src/styles/app.css">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    // Tailwind reads the design tokens from CSS variables, so dark/light/surface scopes swap cleanly.
+    const token = (name) => `rgb(var(--${name}) / <alpha-value>)`;
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            canvas: token('canvas'), surface: token('surface'), raised: token('raised'),
+            line: { DEFAULT: token('line'), strong: token('line-strong') },
+            fg: token('fg'), muted: token('muted'), subtle: token('subtle'),
+            accent: token('accent-rgb'), danger: token('danger'), warn: token('warn'),
+            bg: 'var(--bg)',
+            'surface-1': 'var(--surface-1)',
+            'surface-2': 'var(--surface-2)',
+            'surface-3': 'var(--surface-3)',
+            'border-subtle': 'var(--border-subtle)',
+            'border-default': 'var(--border-default)',
+            'border-strong': 'var(--border-strong)',
+            'text-primary': 'var(--text-primary)',
+            'text-secondary': 'var(--text-secondary)',
+            'text-muted': 'var(--text-muted)',
+            'text-disabled': 'var(--text-disabled)',
+            'text-inverse': 'var(--text-inverse)',
+            'accent-fill': 'var(--accent)',
+            'accent-text': 'var(--accent-text)',
+            'accent-bg': 'var(--accent-bg)',
+            'accent-border': 'var(--accent-border)',
+            'ink-950': 'var(--ink-950)',
+            'ink-900': 'var(--ink-900)',
+            'ink-850': 'var(--ink-850)',
+            'ink-800': 'var(--ink-800)',
+            'ink-700': 'var(--ink-700)',
+            'ink-600': 'var(--ink-600)',
+            'ink-500': 'var(--ink-500)',
+            'ink-400': 'var(--ink-400)'
+          },
+          fontFamily: {
+            sans: ['Geist', 'Inter', 'system-ui', 'sans-serif'],
+            mono: ['"Geist Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace']
+          }
+        }
+      }
+    };
+  </script>
+  <script defer src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.min.js"></script>
+</head>
+<body class="bg-canvas font-sans text-fg antialiased">
+  <a href="#main" class="skip-link">Skip to content</a>
+  <div id="root"></div>
+  <div id="toasts" class="pointer-events-none fixed bottom-4 right-4 z-[60] flex flex-col gap-2" aria-live="polite"></div>
+  <script type="module" src="/src/app/main.js"></script>
+</body>
+</html>

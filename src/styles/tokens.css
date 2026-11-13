@@ -1,0 +1,255 @@
+/*
+  PTaaS Design Tokens — Single Source of Truth
+  ==============================================================================
+  Multi-tier Ink & Paper neutral scales, semantic surface/text/status tokens,
+  surface scopes ([data-surface="dark"|"light"]), typography, radius, motion,
+  and z-index scale.
+
+  Every component must reference semantic tokens (no raw hex or Tailwind
+  palette classes outside this file).
+*/
+
+:root {
+  color-scheme: dark;
+
+  /* ---------------------------------------------------------------------------
+     1. Multi-tier Ink Scale (cool-tinted blacks for dark surfaces & light ink)
+     --------------------------------------------------------------------------- */
+  --ink-950: #07080A; /* Deepest canvas: terminal body, diagram canvas, code editor */
+  --ink-900: #0F1115; /* Primary text on light, primary btn bg, dark page bg */
+  --ink-850: #13161B; /* Dark section/band background (Security band) */
+  --ink-800: #171A20; /* Dark panel/card surface, terminal toolbar, title bars */
+  --ink-700: #20242C; /* Raised/nested surface inside dark panels (zones, nodes, chips) */
+  --ink-600: #2B303A; /* Hairlines, dividers, hovered rows inside dark */
+  --ink-500: #3A404C; /* Strong borders, scrollbar thumb, focus guide lines */
+  --ink-400: #4B5362; /* Icon strokes and decorative lines on dark */
+
+  /* ---------------------------------------------------------------------------
+     2. Paper Scale (light mode surfaces & borders)
+     --------------------------------------------------------------------------- */
+  --paper-50:  #FFFFFF; /* Primary elevated card surface */
+  --paper-100: #F6F7F9; /* Page background */
+  --paper-150: #F1F3F6; /* Sunken / nested surface (surface-2) */
+  --paper-200: #E9ECF0; /* Hover / tertiary surface (surface-3) */
+  --paper-250: #E3E6EB; /* Subtle hairline border */
+  --paper-300: #D2D7DF; /* Default visible card border */
+  --paper-400: #B6BDC9; /* Strong interactive border */
+
+  /* ---------------------------------------------------------------------------
+     3. Radius Scale
+     --------------------------------------------------------------------------- */
+  --radius-sm: 8px;
+  --radius: 12px;
+  --radius-lg: 16px;
+
+  /* ---------------------------------------------------------------------------
+     4. Typography Scale
+     --------------------------------------------------------------------------- */
+  --fs-display: 36px;
+  --fs-section: 18px;
+  --fs-body: 16px;
+  --fs-secondary: 14px;
+  --fs-caption: 13px;
+
+  /* ---------------------------------------------------------------------------
+     5. Motion Tokens
+     --------------------------------------------------------------------------- */
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --dur-fast: 150ms;
+  --dur: 200ms;
+  --dur-slow: 600ms;
+
+  /* ---------------------------------------------------------------------------
+     6. Layout & Container
+     --------------------------------------------------------------------------- */
+  --max-w: 1200px;
+  --header-h: 72px;
+  --header-h-compact: 60px;
+  --header-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --nav-h: 72px;
+  --sidebar-w: 256px;
+  --sidebar-w-collapsed: 72px;
+  --sb-w: 256px;
+  --topbar-h: 56px;
+
+  /* ---------------------------------------------------------------------------
+     7. Strict Z-Index Scale
+     --------------------------------------------------------------------------- */
+  --z-bg: 0;
+  --z-content: 10;
+  --z-navbar: 50;
+  --z-dropdown: 60;
+  --z-modal: 70;
+  --z-toast: 80;
+}
+
+/* =============================================================================
+   DARK THEME & DARK SURFACE SCOPE
+   ============================================================================= */
+:root,
+:root[data-theme="dark"],
+[data-surface="dark"] {
+  color-scheme: dark;
+
+  /* Semantic Surfaces */
+  --bg: var(--ink-900);
+  --surface-1: var(--ink-800);
+  --surface-2: var(--ink-700);
+  --surface-3: var(--ink-600);
+
+  /* Semantic Borders */
+  --border-subtle: var(--ink-600);
+  --border-default: var(--ink-500);
+  --border-strong: var(--ink-400);
+
+  /* Semantic Text */
+  --text-primary: #F2F4F7;
+  --text-secondary: #C3C9D4;
+  --text-muted: #98A1B0;     /* >= 4.5:1 on ink-900, ink-800, ink-700 */
+  --text-disabled: #6B7280;
+  --text-inverse: var(--ink-900);
+
+  /* Accent */
+  --accent: #10B981;
+  --accent-text: #34D399;
+  --accent-bg: rgba(16, 185, 129, 0.14);
+  --accent-border: rgba(52, 211, 153, 0.38);
+
+  /* Status Sets */
+  --success-text: #34D399;
+  --success-bg: rgba(16, 185, 129, 0.14);
+  --success-border: rgba(52, 211, 153, 0.38);
+
+  --warning-text: #FBBF24;
+  --warning-bg: rgba(251, 191, 36, 0.14);
+  --warning-border: rgba(251, 191, 36, 0.38);
+
+  --danger-text: #FCA5A5;
+  --danger-bg: rgba(248, 113, 113, 0.14);
+  --danger-border: rgba(248, 113, 113, 0.38);
+
+  --info-text: #93C5FD;
+  --info-bg: rgba(59, 130, 246, 0.14);
+  --info-border: rgba(147, 197, 253, 0.38);
+
+  /* Focus ring */
+  --focus-ring: var(--accent);
+
+  /* Tailwind RGB channel bindings */
+  --canvas: 15 17 21;
+  --surface: 23 26 32;
+  --raised: 32 36 44;
+  --line: 43 48 58;
+  --line-strong: 58 64 76;
+  --fg: 242 244 247;
+  --muted: 152 161 176;
+  --subtle: 152 161 176;
+  --accent-rgb: 52 211 153;
+  --danger: 252 165 165;
+  --warn: 251 191 36;
+
+  /* Calm Decorative Tokens (Dark) */
+  --decor-dot: rgba(242, 244, 247, 0.06);
+  --decor-line: rgba(242, 244, 247, 0.05);
+  --decor-accent: 16 185 129;
+  --decor-glow-max: 0.07;
+  --scrim: rgba(9, 9, 11, 0.65);
+}
+
+/* =============================================================================
+   LIGHT THEME & LIGHT SURFACE SCOPE
+   ============================================================================= */
+:root[data-theme="light"],
+[data-surface="light"] {
+  color-scheme: light;
+
+  /* Semantic Surfaces */
+  --bg: var(--paper-100);
+  --surface-1: var(--paper-50);
+  --surface-2: var(--paper-150);
+  --surface-3: var(--paper-200);
+
+  /* Semantic Borders */
+  --border-subtle: var(--paper-250);
+  --border-default: var(--paper-300);
+  --border-strong: var(--paper-400);
+
+  /* Semantic Text */
+  --text-primary: var(--ink-900);
+  --text-secondary: #3B424D;
+  --text-muted: #586170;     /* >= 4.5:1 on bg (#F6F7F9) and surface-2 (#F1F3F6) */
+  --text-disabled: #8A93A1;  /* Disabled controls only */
+  --text-inverse: #FFFFFF;
+
+  /* Accent (bright fill vs accessible dark text) */
+  --accent: #10B981;
+  --accent-text: #007A55;    /* >= 5:1 on white and #F6F7F9 */
+  --accent-bg: #E6F6EF;
+  --accent-border: #9BD9BF;
+
+  /* Status Sets */
+  --success-text: #007A55;
+  --success-bg: #E6F6EF;
+  --success-border: #9BD9BF;
+
+  --warning-text: #92400E;
+  --warning-bg: #FEF3C7;
+  --warning-border: #D97706;
+
+  --danger-text: #B42318;
+  --danger-bg: #FEE4E2;
+  --danger-border: #F97066;
+
+  --info-text: #1D4ED8;
+  --info-bg: #E0EAFF;
+  --info-border: #60A5FA;
+
+  /* Focus ring */
+  --focus-ring: var(--accent-text);
+
+  /* Tailwind RGB channel bindings */
+  --canvas: 246 247 249;
+  --surface: 255 255 255;
+  --raised: 241 243 246;
+  --line: 210 215 223;
+  --line-strong: 182 189 201;
+  --fg: 15 17 21;
+  --muted: 88 97 112;
+  --subtle: 88 97 112;
+  --accent-rgb: 0 122 85;
+  --danger: 180 35 24;
+  --warn: 146 64 14;
+
+  /* Calm Decorative Tokens (Light) */
+  --decor-dot: rgba(15, 17, 21, 0.045);
+  --decor-line: rgba(15, 17, 21, 0.04);
+  --decor-accent: 16 185 129;
+  --decor-glow-max: 0.04;
+  --scrim: rgba(9, 9, 11, 0.45);
+}
+
+/* =============================================================================
+   HIGH CONTRAST PREFERENCE (prefers-contrast: more)
+   ============================================================================= */
+@media (prefers-contrast: more) {
+  :root[data-theme="light"],
+  [data-surface="light"] {
+    --text-secondary: #1F242D;
+    --text-muted: #3B424D;
+    --border-subtle: #B6BDC9;
+    --border-default: #8A93A1;
+    --border-strong: #586170;
+    --accent-text: #005C3F;
+  }
+
+  :root[data-theme="dark"],
+  [data-surface="dark"] {
+    --text-secondary: #E2E6EE;
+    --text-muted: #C3C9D4;
+    --border-subtle: #4B5362;
+    --border-default: #6B7280;
+    --border-strong: #98A1B0;
+    --accent-text: #6EE7B7;
+  }
+}

@@ -1,0 +1,28 @@
+#cloud-config
+# PTaaS Cloud — Ubuntu 24.04 LTS Desktop Cloud-Init Profile
+users:
+  - name: student
+    gecos: PTaaS Student
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: [sudo, audio, video]
+    shell: /bin/bash
+    lock_passwd: false
+
+packages:
+  - xubuntu-desktop
+  - xrdp
+  - tigervnc-standalone-server
+  - qemu-guest-agent
+  - dbus-x11
+
+write_files:
+  - path: /home/student/.xsession
+    owner: student:student
+    permissions: '0644'
+    content: |
+      #!/bin/sh
+      exec startxfce4
+
+runcmd:
+  - systemctl enable --now qemu-guest-agent
+  - systemctl enable --now xrdp

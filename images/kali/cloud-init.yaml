@@ -1,0 +1,72 @@
+#cloud-config
+# PTaaS Cloud — Guest VM Cloud-Init Profile
+# Auto-configures user student, XRDP display server, QEMU guest agent, and pentest tools.
+
+users:
+  - name: student
+    gecos: PTaaS Student
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: [sudo, dialout, cdrom, floppy, audio, dip, video, plugdev, netdev]
+    shell: /bin/bash
+    lock_passwd: false
+
+package_update: true
+packages:
+  - kali-desktop-xfce
+  - kali-tools-top10
+  - xrdp
+  - tigervnc-standalone-server
+  - qemu-guest-agent
+  - dbus-x11
+  - nmap
+  - wireshark
+  - burpsuite
+  - sqlmap
+  - hydra
+  - john
+  - metasploit-framework
+
+write_files:
+  - path: /etc/xrdp/xrdp.ini
+    permissions: '0644'
+    content: |
+      [Globals]
+      ini_version=1
+      fork=true
+      port=3389
+      tcp_nodelay=true
+      tcp_keepalive=true
+      security_layer=rdp
+      crypt_level=high
+      max_bpp=24
+      [Xorg]
+      name=Xorg
+      lib=libxup.so
+      username=ask
+      password=ask
+      ip=127.0.0.1
+      port=-1
+      code=20
+
+  - path: /home/student/.xsession
+    owner: student:student
+    permissions: '0644'
+    content: |
+      #!/bin/sh
+      unset DBUS_SESSION_BUS_ADDRESS
+      unset XDG_RUNTIME_DIR
+      exec dbus-launch --exit-with-session startxfce4
+
+runcmd:
+  # Enable guest agent for real-time CPU/RAM/IP telemetry
+  - systemctl enable --now qemu-guest-agent
+  # Configure xrdp certificate and service
+  - adduser xrdp ssl-cert
+  - systemctl enable --now xrdp
+  # Disable display sleep and screensaver
+  - xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/blank-on-ac -s 0 || true
+  - xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-ac-sleep -s 0 || true
+  - xfconf-query -c xfce4-power-manager -p /xfce4-power-manager/dpms-on-ac-off -s 0 || true
+  # Guest firewall: allow RDP/VNC from gateway tenant network only
+  - iptables -A INPUT -p tcp -s 10.10.0.0/16 --dport 3389 -j ACCEPT
+  - iptables -A INPUT -p tcp -s 10.10.0.0/16 --dport 5901 -j ACCEPT

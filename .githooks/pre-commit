@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+set -e
+
+node scripts/check-no-host-access.mjs
+node scripts/check-demo-data.js
+node scripts/check-email-domains.mjs
+node scripts/check-denylist.mjs
+
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks protect --staged --no-banner
+fi

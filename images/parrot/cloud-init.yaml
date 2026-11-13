@@ -1,0 +1,31 @@
+#cloud-config
+# PTaaS Cloud — Parrot Security 6.1 MATE Cloud-Init Profile
+users:
+  - name: student
+    gecos: PTaaS Student
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: [sudo, audio, video, plugdev, netdev]
+    shell: /bin/bash
+    lock_passwd: false
+
+packages:
+  - parrot-desktop-mate
+  - parrot-tools
+  - xrdp
+  - tigervnc-standalone-server
+  - qemu-guest-agent
+  - dbus-x11
+
+write_files:
+  - path: /home/student/.xsession
+    owner: student:student
+    permissions: '0644'
+    content: |
+      #!/bin/sh
+      exec mate-session
+
+runcmd:
+  - systemctl enable --now qemu-guest-agent
+  - systemctl enable --now xrdp
+  - gsettings set org.mate.screensaver lock-enabled false || true
+  - gsettings set org.mate.screensaver idle-activation-enabled false || true

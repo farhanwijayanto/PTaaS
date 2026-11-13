@@ -1,0 +1,79 @@
+# PTaaS Cloud — Local Development Remote Desktop Stack
+# Runs guacd (Apache Guacamole proxy daemon) and real Linux desktop containers with xrdp / VNC.
+# Usage:
+#   docker compose -f docker-compose.dev.yml up -d
+#   DESKTOP_BACKEND=docker node server.js
+
+version: '3.8'
+
+services:
+  # Guacamole proxy daemon: translates Guacamole protocol instructions to RDP/VNC
+  guacd:
+    image: guacamole/guacd:1.5.5
+    container_name: ptaas-guacd
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:4822:4822"
+    networks:
+      - ptaas-net
+
+  # Isolated Guest Kali Linux Lab VM (SSH + Desktop)
+  # Completely sandboxed: no host mounts, dropped capabilities, non-privileged, non-root user student
+  kali-lab-01:
+    image: kasmweb/kali-rolling-desktop:1.15.0
+    container_name: ptaas-vm-kali-lab-01
+    restart: unless-stopped
+    shm_size: '2gb'
+    ports:
+      - "127.0.0.1:2222:2222"  # SSH PTY Gateway (isolated)
+      - "127.0.0.1:3389:3389"  # RDP
+      - "127.0.0.1:5901:5901"  # VNC
+      - "127.0.0.1:6901:6901"  # Kasm Web HTTPS (internal fallback)
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - VNC_PW=student123
+      - USER=student
+      - PASSWORD=student123
+      - SSH_PORT=2222
+    networks:
+      - ptaas-net
+
+  # Isolated Guest Ubuntu 24.04 Dev VM (SSH + Desktop)
+  # Completely sandboxed: no host mounts, dropped capabilities, non-privileged, non-root user student
+  ubuntu-dev-01:
+    image: kasmweb/ubuntu-noble-desktop:1.15.0
+    container_name: ptaas-vm-ubuntu-dev-01
+    restart: unless-stopped
+    shm_size: '2gb'
+    ports:
+      - "127.0.0.1:2223:2222"  # SSH PTY Gateway (isolated)
+      - "127.0.0.1:3390:3389"  # RDP
+      - "127.0.0.1:5902:5901"  # VNC
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - VNC_PW=student123
+      - USER=student
+      - PASSWORD=student123
+      - SSH_PORT=2222
+    networks:
+      - ptaas-net
+
+networks:
+  ptaas-net:
+    driver: bridge
