@@ -4,391 +4,341 @@ import { api } from '../../lib/api.js';
 import { navigate, onCleanup } from '../../lib/router.js';
 import { subscribeTheme, getTheme } from '../../lib/theme.js';
 import { button } from '../../components/ui/button.js';
-import { badge } from '../../components/ui/badge.js';
 import { toast } from '../../components/ui/toast.js';
 import { pageHeader } from '../../components/layout/page-header.js';
 import { PageContainer } from '../../components/layout/page-container.js';
-
-// Real xterm.js & addons
-import { Terminal } from '../../lib/xterm/xterm.mjs';
-import { FitAddon } from '../../lib/xterm/addon-fit.mjs';
-import { SearchAddon } from '../../lib/xterm/addon-search.mjs';
-import { WebLinksAddon } from '../../lib/xterm/addon-web-links.mjs';
-import { Unicode11Addon } from '../../lib/xterm/addon-unicode11.mjs';
 import { THEMES } from './terminal-themes.js';
-import { createDemoShell } from './demo-shell.js';
-import { DEMO_BANNER_TEXT } from '../../lib/demo-mode.js';
 
 const SNIPPETS = [
   { label: 'Nmap Lab Scan', cmd: 'nmap -sV 10.10.2.10', desc: 'Scan lab services & versions' },
   { label: 'Nmap Stealth SYN', cmd: 'nmap -sS -T4 10.10.2.10', desc: 'Fast SYN scan' },
-  { label: 'System Process Monitor', cmd: 'htop', desc: 'Interactive CPU/RAM process monitor' },
+  { label: 'System Process Monitor', cmd: 'top', desc: 'Interactive CPU/RAM process monitor' },
   { label: 'Kernel Architecture', cmd: 'uname -a', desc: 'Guest OS kernel release info' },
   { label: 'Current User Identity', cmd: 'whoami && id', desc: 'Print user ID & group' },
   { label: 'Network Interfaces', cmd: 'ip -br a', desc: 'Show guest VPC IP addresses' },
-  { label: 'Egress Block Test', cmd: 'ping -c 3 -W 2 8.8.8.8', desc: 'Verify NIST egress block' },
-  { label: 'Metasploit Console', cmd: 'msfconsole -q', desc: 'Launch framework console' }
+  { label: 'Ping Host Check', cmd: 'ping -c 3 10.10.1.2', desc: 'Test ICMP connectivity inside lab' },
+  { label: 'List Home Files', cmd: 'ls -la ~', desc: 'Inspect home directory contents' }
 ];
+
+function charToKeysym(ch) {
+  const code = ch.codePointAt(0);
+  if (code == null) return null;
+  if (ch === '\n' || ch === '\r') return 0xFF0D;
+  if (ch === '\t') return 0xFF09;
+  if (code >= 0x20 && code <= 0x7E) return code;
+  if (code >= 0xA0 && code <= 0xFF) return code;
+  return 0x01000000 | code;
+}
+
+function sendCtrlKey(client, letterCode) {
+  if (!client) return;
+  client.sendKeyEvent(1, 0xFFE3); // Control_L down
+  client.sendKeyEvent(1, letterCode);
+  client.sendKeyEvent(0, letterCode);
+  client.sendKeyEvent(0, 0xFFE3); // Control_L up
+}
+
+function sendTextToClient(client, text) {
+  if (!client || !text) return;
+  for (const ch of text) {
+    const ks = charToKeysym(ch);
+    if (ks != null) {
+      client.sendKeyEvent(1, ks);
+      client.sendKeyEvent(0, ks);
+    }
+  }
+}
 
 export function TerminalPage({ params, query } = {}) {
   let vms = [];
   let selectedVmId = query?.get('vm') || params?.id || null;
-  let mode = process.env.NEXT_PUBLIC_GUAC_WS_URL ? 'ssh' : 'sim'; // 'ssh' | 'sim'
-  let sshStatus = 'Connecting...';
-  let sshError = null;
-  let sshClient = null;
-  let sshKeyboard = null;
-  let sshResizeCleanup = null;
-  let destroyed = false;
   let activeThemeKey = 'kali';
-  let promptStyle = 'classic'; // 'classic' or 'kali'
   let fontSize = 13;
   let isFullscreen = false;
   let showSnippets = false;
-  let showSearch = false;
-  let searchQuery = '';
-  let searchResultsCount = 0;
+  let destroyed = false;
 
   let nextTabId = 1;
   let tabs = [];
   let activeTabId = null;
+  let lastClipboardText = '';
 
   const host = h('div', { class: 'space-y-4 font-sans select-none pb-8' });
-  const terminalStackEl = h('div', { class: 'relative w-full h-full flex-1' });
-  const liveSshMount = h('div', {
-    class: 'relative z-0 isolate flex-1 w-full h-full overflow-hidden flex items-center justify-center'
+  const headerContainer = h('div', { class: 'pb-1' });
+  const controlsRow = h('div', {
+    class: 'flex flex-wrap items-center justify-between gap-3 border-b px-4 py-2.5 text-xs transition-colors'
   });
-  const liveSshOverlay = h('div', {
-    class: 'hidden absolute inset-0 z-10 flex items-center justify-center p-6 bg-canvas/90'
+  const terminalStackEl = h('div', { class: 'relative w-full h-full flex-1 overflow-hidden' });
+  const mobileKeyBar = h('div', {
+    class: 'hidden coarse:flex max-md:flex items-center gap-1.5 overflow-x-auto border-t px-3 py-1.5 text-xs text-fg'
   });
-  const liveSshWrapper = h('div', {
-    class: 'relative flex-1 w-full h-full flex flex-col overflow-hidden'
-  }, liveSshMount, liveSshOverlay);
 
-  // Outer terminal container wrapper - unified theme-matched surface
   const terminalCard = h('div', {
     'data-surface': 'dark',
     class: 'relative flex flex-col rounded-xl border overflow-hidden shadow-2xl transition-all',
-    style: 'height: calc(100dvh - 180px); min-height: 520px; border-color: var(--border-default); background-color: var(--ink-950);'
+    style: 'height: calc(100dvh - 180px); min-height: 540px;'
   });
 
+  function resolveThemeKey() {
+    if (activeThemeKey === 'app') {
+      return getTheme() === 'light' ? 'light' : 'kali';
+    }
+    return THEMES[activeThemeKey] ? activeThemeKey : 'kali';
+  }
+
+  function resolveThemeObj() {
+    return THEMES[resolveThemeKey()] || THEMES.kali;
+  }
+
   function getActiveTab() {
-    return tabs.find(t => t.id === activeTabId) || null;
+    return tabs.find((t) => t.id === activeTabId) || null;
   }
 
-  // Load VM List
-  async function loadVms() {
-    try {
-      const list = await api.vms.list().catch(() => []);
-      vms = list.filter(v => v.status === 'running');
-      if (vms.length === 0) {
-        vms = [
-          { id: 'vm-1', name: 'kali-lab-01', ip: '10.10.1.5', status: 'running' },
-          { id: 'vm-2', name: 'parrot-sec-01', ip: '10.10.1.8', status: 'running' }
-        ];
-      }
-      if (!selectedVmId && vms.length > 0) {
-        selectedVmId = vms[0].id;
-      }
-      renderHeader();
-      renderControls();
-      syncModeView();
-      if (mode === 'ssh') {
-        connectLiveSsh();
-      } else if (tabs.length === 0 && selectedVmId) {
-        createNewTab();
-      }
-    } catch (err) {
-      toast.error('Failed to load virtual machines');
+  function getSelectedVm() {
+    return vms.find((v) => v.id === selectedVmId || v.name === selectedVmId) || vms[0] || {
+      id: 'vm-1',
+      name: 'kali-lab-01',
+      ip: '10.10.1.5',
+      status: 'running'
+    };
+  }
+
+  function disconnectTab(tab) {
+    if (!tab) return;
+    if (tab.resizeTimer) {
+      clearTimeout(tab.resizeTimer);
+      tab.resizeTimer = null;
+    }
+    if (tab.client) {
+      try { tab.client.disconnect(); } catch { /* ignore */ }
+      tab.client = null;
     }
   }
 
-  function disconnectLiveSsh() {
-    if (sshResizeCleanup) {
-      sshResizeCleanup();
-      sshResizeCleanup = null;
-    }
-    if (sshKeyboard) {
-      sshKeyboard.onkeydown = null;
-      sshKeyboard.onkeyup = null;
-      sshKeyboard = null;
-    }
-    if (sshClient) {
-      try { sshClient.disconnect(); } catch { /* ignore */ }
-      sshClient = null;
+  function sendTabSize(tab) {
+    if (!tab || !tab.client || tab.status !== 'connected') return;
+    const w = Math.floor(tab.mount.clientWidth);
+    const hPx = Math.floor(tab.mount.clientHeight);
+    if (w >= 200 && hPx >= 120 && (w !== tab.lastW || hPx !== tab.lastH)) {
+      tab.lastW = w;
+      tab.lastH = hPx;
+      try {
+        tab.client.sendSize(w, hPx);
+        tab.client.getDisplay().scale(1);
+      } catch { /* ignore */ }
     }
   }
 
-  function renderSshOverlay() {
-    liveSshOverlay.innerHTML = '';
-    if (!sshError) {
-      liveSshOverlay.classList.add('hidden');
+  function renderTabOverlay(tab) {
+    tab.overlay.innerHTML = '';
+    if (!tab.error) {
+      tab.overlay.classList.add('hidden');
       return;
     }
-    const vm = vms.find((v) => v.id === selectedVmId) || vms[0] || { id: 'vm-1', name: 'kali-lab-01' };
-    liveSshOverlay.classList.remove('hidden');
-    liveSshOverlay.appendChild(
+    const vm = getSelectedVm();
+    tab.overlay.classList.remove('hidden');
+    tab.overlay.appendChild(
       h('div', { class: 'max-w-lg w-full rounded-xl border border-line bg-surface p-5 space-y-3 text-xs text-fg' },
         h('div', { class: 'flex items-center gap-2 font-semibold text-sm text-danger' },
           icon('alert-circle', 'w-4 h-4'),
-          'Live SSH Terminal Belum Aktif di Container'
+          'SSH Connection Interrupted'
         ),
         h('p', { class: 'text-muted leading-relaxed' },
-          `Koneksi SSH (port 22) ke ${vm.name} gagal (${sshError}). Pastikan openssh-server sudah terpasang dan berjalan di dalam container Kali Linux.`
-        ),
-        h('pre', { class: 'rounded-lg border border-line bg-canvas p-3 font-mono text-[11px] text-accent overflow-x-auto select-text' },
-          'sudo apt update && sudo apt install -y openssh-server iputils-ping && sudo service ssh start'
+          `Koneksi live SSH ke ${vm.name} terputus (${tab.error}). Pastikan service ssh aktif di port 22 pada container Kali Linux.`
         ),
         h('div', { class: 'flex flex-wrap gap-2 pt-1' },
-          button({ label: 'Retry Live SSH', icon: 'refresh-cw', variant: 'primary', size: 'sm', onClick: () => connectLiveSsh() }),
-          button({ label: 'Open Kali Desktop', icon: 'monitor', variant: 'secondary', size: 'sm', onClick: () => navigate(`/desktop?vm=${encodeURIComponent(vm.id)}`) }),
-          button({ label: 'Use Simulated Shell', icon: 'terminal', variant: 'ghost', size: 'sm', onClick: () => switchMode('sim') })
+          button({ label: 'Reconnect SSH', icon: 'refresh-cw', variant: 'primary', size: 'sm', onClick: () => connectTab(tab) }),
+          button({ label: 'Open Kali Desktop', icon: 'monitor', variant: 'secondary', size: 'sm', onClick: () => navigate(`/desktop?vm=${encodeURIComponent(vm.id)}`) })
         )
       )
     );
   }
 
-  function syncModeView() {
-    if (mode === 'ssh') {
-      liveSshWrapper.style.display = 'flex';
-      terminalStackEl.style.display = 'none';
-      mobileKeyBar.style.display = 'none';
-    } else {
-      liveSshWrapper.style.display = 'none';
-      terminalStackEl.style.display = 'block';
-      mobileKeyBar.style.display = '';
-      if (tabs.length === 0 && selectedVmId) {
-        createNewTab();
-      } else {
-        const active = getActiveTab();
-        if (active) {
-          requestAnimationFrame(() => {
-            active.fitAddon.fit();
-            active.term.focus();
-          });
-        }
-      }
-    }
-    renderBanner();
-    renderHeader();
-  }
+  async function connectTab(tab) {
+    if (destroyed || !tab) return;
+    disconnectTab(tab);
 
-  function switchMode(nextMode) {
-    if (mode === nextMode) return;
-    mode = nextMode;
-    if (mode === 'ssh') {
-      syncModeView();
-      connectLiveSsh();
-    } else {
-      disconnectLiveSsh();
-      syncModeView();
-    }
-  }
-
-  async function connectLiveSsh() {
-    disconnectLiveSsh();
-    if (destroyed || mode !== 'ssh') return;
-
-    const vm = vms.find((v) => v.id === selectedVmId) || vms[0] || { id: 'vm-1', name: 'kali-lab-01' };
-    sshStatus = 'Connecting...';
-    sshError = null;
-    renderBanner();
-    renderSshOverlay();
+    const vm = getSelectedVm();
+    const startedAt = performance.now();
+    tab.status = 'connecting';
+    tab.error = null;
+    tab.latency = null;
+    tab.lastW = 0;
+    tab.lastH = 0;
+    renderTabOverlay(tab);
+    renderControls();
 
     const wsBase = process.env.NEXT_PUBLIC_GUAC_WS_URL;
     if (!wsBase) {
-      sshError = 'NEXT_PUBLIC_GUAC_WS_URL not configured';
-      sshStatus = 'Unavailable';
-      renderBanner();
-      renderSshOverlay();
+      tab.status = 'disconnected';
+      tab.error = 'NEXT_PUBLIC_GUAC_WS_URL is not configured';
+      renderTabOverlay(tab);
+      renderControls();
       return;
     }
 
+    // Wait one animation frame so container has real laid-out dimensions
+    await new Promise((r) => requestAnimationFrame(r));
+    if (destroyed) return;
+
+    const width = Math.max(480, Math.min(3840, Math.floor(tab.mount.clientWidth || terminalStackEl.clientWidth - 24 || 1120)));
+    const height = Math.max(320, Math.min(2160, Math.floor(tab.mount.clientHeight || terminalStackEl.clientHeight - 24 || 560)));
+
     try {
-      const res = await fetch(`/api/guac-token?vm=${encodeURIComponent(vm.id)}&protocol=ssh`, {
-        credentials: 'same-origin'
-      });
+      const qs = new URLSearchParams({
+        vm: vm.id,
+        protocol: 'ssh',
+        width: String(width),
+        height: String(height),
+        fontSize: String(fontSize),
+        theme: resolveThemeKey()
+      }).toString();
+
+      const res = await fetch(`/api/guac-token?${qs}`, { credentials: 'same-origin' });
       if (res.status === 401) {
         navigate('/login', { replace: true });
         return;
       }
       const data = await res.json();
       if (!res.ok || !data?.token) {
-        throw new Error(data?.error || 'Failed to obtain SSH token');
+        throw new Error(data?.error || 'Failed to obtain SSH session token');
       }
-      if (destroyed || mode !== 'ssh') return;
+      if (destroyed || !tabs.includes(tab)) return;
 
       const baseWsUrl = `${wsBase.replace(/\/+$/, '')}/`;
       const tunnel = new Guacamole.WebSocketTunnel(baseWsUrl);
 
       tunnel.onerror = (err) => {
-        if (destroyed || mode !== 'ssh') return;
-        sshError = `Tunnel error (code=${err?.code}): ${err?.message || 'connection failed'}`;
-        sshStatus = 'Error';
-        renderBanner();
-        renderSshOverlay();
+        if (destroyed) return;
+        tab.status = 'disconnected';
+        tab.error = `Tunnel error (code=${err?.code}): ${err?.message || 'connection failed'}`;
+        renderTabOverlay(tab);
+        renderControls();
       };
 
       const client = new Guacamole.Client(tunnel);
-      sshClient = client;
+      tab.client = client;
       const display = client.getDisplay();
+      const displayEl = display.getElement();
+      displayEl.style.margin = '0';
 
-      liveSshMount.innerHTML = '';
-      liveSshMount.appendChild(display.getElement());
+      tab.mount.innerHTML = '';
+      tab.mount.appendChild(displayEl);
 
-      const fitSsh = () => {
-        const dw = display.getWidth();
-        const dh = display.getHeight();
-        if (dw > 0 && dh > 0 && liveSshMount.clientWidth > 0 && liveSshMount.clientHeight > 0) {
-          const scale = Math.min(liveSshMount.clientWidth / dw, liveSshMount.clientHeight / dh, 1);
-          display.scale(scale);
-        }
+      // Capture clipboard data sent by Guacamole SSH when user selects text
+      client.onclipboard = (stream, mimetype) => {
+        if (!mimetype || !mimetype.startsWith('text/')) return;
+        const reader = new Guacamole.StringReader(stream);
+        let collected = '';
+        reader.ontext = (chunk) => { collected += chunk; };
+        reader.onend = () => {
+          lastClipboardText = collected;
+          if (collected && navigator.clipboard?.writeText) {
+            navigator.clipboard.writeText(collected).catch(() => {});
+          }
+        };
       };
 
       client.onstatechange = (state) => {
-        if (destroyed || mode !== 'ssh') return;
-        const states = ['Idle', 'Connecting...', 'Waiting...', 'Connected', 'Disconnecting...', 'Disconnected'];
-        sshStatus = states[state] || 'Unknown';
+        if (destroyed) return;
         if (state === 3) {
-          sshError = null;
-          setTimeout(fitSsh, 150);
+          tab.status = 'connected';
+          tab.error = null;
+          tab.latency = Math.max(1, Math.round(performance.now() - startedAt));
+          tab.lastW = width;
+          tab.lastH = height;
+          display.scale(1);
+          setTimeout(() => sendTabSize(tab), 120);
+        } else if (state === 1 || state === 2) {
+          tab.status = 'connecting';
+        } else if (state === 5) {
+          tab.status = 'disconnected';
         }
-        renderBanner();
-        renderSshOverlay();
+        renderTabOverlay(tab);
+        renderControls();
       };
 
       client.onerror = (err) => {
-        if (destroyed || mode !== 'ssh') return;
-        sshError = `Client error (code=${err?.code}): ${err?.message || 'SSH upstream error'}`;
-        sshStatus = 'Disconnected';
-        renderBanner();
-        renderSshOverlay();
+        if (destroyed) return;
+        tab.status = 'disconnected';
+        tab.error = `Client error (code=${err?.code}): ${err?.message || 'SSH upstream error'}`;
+        renderTabOverlay(tab);
+        renderControls();
       };
 
-      const keyboard = new Guacamole.Keyboard(document);
-      sshKeyboard = keyboard;
-      keyboard.onkeydown = (keysym) => {
-        const tag = document.activeElement?.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
-        client.sendKeyEvent(1, keysym);
-        return false;
+      const mouse = new Guacamole.Mouse(displayEl);
+      mouse.onmousedown = mouse.onmouseup = mouse.onmousemove = (mouseState) => {
+        const scale = display.getScale() || 1;
+        client.sendMouseState(new Guacamole.Mouse.State(
+          mouseState.x / scale,
+          mouseState.y / scale,
+          mouseState.left,
+          mouseState.middle,
+          mouseState.right,
+          mouseState.up,
+          mouseState.down
+        ));
       };
-      keyboard.onkeyup = (keysym) => {
-        const tag = document.activeElement?.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-        client.sendKeyEvent(0, keysym);
-      };
-
-      const onResize = () => fitSsh();
-      window.addEventListener('resize', onResize);
-      sshResizeCleanup = () => window.removeEventListener('resize', onResize);
 
       client.connect(`token=${encodeURIComponent(data.token)}`);
     } catch (err) {
-      if (destroyed || mode !== 'ssh') return;
-      sshError = err instanceof Error ? err.message : 'SSH connection failed';
-      sshStatus = 'Error';
-      renderBanner();
-      renderSshOverlay();
+      if (destroyed) return;
+      tab.status = 'disconnected';
+      tab.error = err instanceof Error ? err.message : 'SSH connection failed';
+      renderTabOverlay(tab);
+      renderControls();
     }
   }
 
-  // Create a new terminal tab connected over WebSocket
-  async function createNewTab(customTitle = null) {
-    if (!selectedVmId) {
-      toast.error('No virtual machine selected');
-      return;
-    }
-
+  function createNewTab(customTitle = null) {
     const tabId = nextTabId++;
     const title = customTitle || `Terminal ${tabId}`;
 
+    const mount = h('div', {
+      class: 'relative z-0 isolate w-full h-full overflow-hidden'
+    });
+    const overlay = h('div', {
+      class: 'hidden absolute inset-0 z-10 flex items-center justify-center p-6 bg-canvas/85'
+    });
     const container = h('div', {
       class: 'absolute inset-0 p-3 overflow-hidden outline-none',
       tabindex: '0'
-    });
+    }, mount, overlay);
 
     terminalStackEl.appendChild(container);
-
-    const term = new Terminal({
-      allowProposedApi: true,
-      cursorBlink: true,
-      cursorStyle: 'block',
-      fontSize: fontSize,
-      fontFamily: '"JetBrains Mono", "Geist Mono", monospace',
-      lineHeight: 1.25,
-      letterSpacing: 0,
-      scrollback: 5000,
-      allowTransparency: true,
-      theme: THEMES[activeThemeKey]
-    });
-
-    const fitAddon = new FitAddon();
-    const searchAddon = new SearchAddon();
-    const webLinksAddon = new WebLinksAddon();
-    const unicode11Addon = new Unicode11Addon();
-
-    term.loadAddon(fitAddon);
-    term.loadAddon(searchAddon);
-    term.loadAddon(webLinksAddon);
-    term.loadAddon(unicode11Addon);
-    term.unicode.activeVersion = '11';
-
-    term.open(container);
 
     const tab = {
       id: tabId,
       title,
-      term,
-      fitAddon,
-      searchAddon,
       container,
-      shell: null,
-      status: 'connected',
-      latency: 1,
-      sessionLog: []
+      mount,
+      overlay,
+      client: null,
+      status: 'connecting',
+      latency: null,
+      error: null,
+      lastW: 0,
+      lastH: 0,
+      resizeTimer: null
     };
 
-    const vm = vms.find(v => v.id === selectedVmId) || vms[0] || { name: 'kali-lab-01', ip: '10.10.1.5' };
-    tab.shell = createDemoShell({
-      term,
-      vmName: vm.name,
-      vmIp: vm.ip || '10.10.1.5',
-      getPromptStyle: () => promptStyle,
-      onLog: (chunk) => tab.sessionLog.push(chunk),
+    container.addEventListener('click', () => {
+      container.focus();
     });
 
     tabs.push(tab);
     switchTab(tabId);
-
-    // Click anywhere in container focuses term
-    container.addEventListener('click', () => {
-      term.focus();
-    });
-
-    // Send input from xterm to deterministic in-memory demo shell
-    term.onData((data) => {
-      tab.shell?.handleData(data);
-    });
-
-    tab.shell.boot();
-    requestAnimationFrame(() => {
-      tab.fitAddon.fit();
-      tab.term.focus();
-    });
+    connectTab(tab);
   }
 
-  function sendResize() {}
-
-  // Switch active tab
   function switchTab(tabId) {
     activeTabId = tabId;
-    tabs.forEach(t => {
+    tabs.forEach((t) => {
       if (t.id === tabId) {
         t.container.style.display = 'block';
         requestAnimationFrame(() => {
-          t.fitAddon.fit();
-          t.term.focus();
+          sendTabSize(t);
+          t.container.focus();
         });
       } else {
         t.container.style.display = 'none';
@@ -397,18 +347,16 @@ export function TerminalPage({ params, query } = {}) {
     renderControls();
   }
 
-  // Close tab
   function closeTab(tabId, e) {
     if (e) e.stopPropagation();
-    const idx = tabs.findIndex(t => t.id === tabId);
+    const idx = tabs.findIndex((t) => t.id === tabId);
     if (idx === -1) return;
 
     const tab = tabs[idx];
-    try { tab.term.dispose(); } catch {}
+    disconnectTab(tab);
     if (tab.container.parentElement) {
       tab.container.parentElement.removeChild(tab.container);
     }
-
     tabs.splice(idx, 1);
 
     if (tabs.length === 0) {
@@ -419,207 +367,172 @@ export function TerminalPage({ params, query } = {}) {
     }
   }
 
-  // Reconnect active tab
   function reconnectActiveTab() {
     const tab = getActiveTab();
     if (!tab) return;
-    tab.shell?.boot();
-    tab.term.focus();
-    toast.info('Reset demo terminal session');
+    connectTab(tab);
+    toast({ title: 'Reconnecting SSH', description: `Membuka ulang sesi ${tab.title}...`, kind: 'info' });
   }
 
-  // Download session log as .txt
-  function downloadSessionLog() {
-    const tab = getActiveTab();
-    if (!tab) return;
-    const text = tab.sessionLog.join('');
-    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${tab.title.toLowerCase().replace(/\s+/g, '-')}-log.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    toast.success('Terminal session log downloaded');
-  }
-
-  // Copy selection to clipboard
   function copySelection() {
-    const tab = getActiveTab();
-    if (!tab) return;
-    const sel = tab.term.getSelection();
-    if (sel) {
-      navigator.clipboard?.writeText(sel);
-      toast.success('Selection copied to clipboard');
+    if (lastClipboardText) {
+      navigator.clipboard?.writeText(lastClipboardText).catch(() => {});
+      toast({ title: 'Copied', description: 'Teks terminal disalin ke clipboard.', kind: 'success' });
     } else {
-      toast.info('No text selected in terminal');
+      toast({ title: 'Select text first', description: 'Blok teks di terminal untuk menyalin ke clipboard.', kind: 'info' });
     }
   }
 
-  // Paste clipboard into terminal
   async function pasteClipboard() {
     const tab = getActiveTab();
-    if (!tab) return;
+    if (!tab?.client || tab.status !== 'connected') {
+      toast({ title: 'Not connected', description: 'Tunggu koneksi SSH aktif sebelum paste.', kind: 'error' });
+      return;
+    }
     try {
       const text = await navigator.clipboard.readText();
       if (text) {
-        tab.term.paste(text);
+        sendTextToClient(tab.client, text);
       }
     } catch {
-      toast.error('Clipboard access not allowed by browser');
+      toast({ title: 'Clipboard blocked', description: 'Izinkan akses clipboard di browser.', kind: 'error' });
     }
   }
 
-  // Clear terminal
   function clearTerminal() {
     const tab = getActiveTab();
-    if (!tab) return;
-    tab.term.clear();
-    toast.info('Terminal buffer cleared');
+    if (!tab?.client || tab.status !== 'connected') return;
+    sendCtrlKey(tab.client, 0x006C); // Ctrl+L
   }
 
-  // Set font size
   function changeFontSize(delta) {
-    fontSize = Math.min(22, Math.max(10, fontSize + delta));
-    tabs.forEach(t => {
-      t.term.options.fontSize = fontSize;
-      requestAnimationFrame(() => t.fitAddon.fit());
-    });
+    const next = Math.min(22, Math.max(10, fontSize + delta));
+    if (next === fontSize) return;
+    fontSize = next;
     renderControls();
+    const active = getActiveTab();
+    if (active) connectTab(active);
   }
 
-  function resolveThemeObj(key) {
-    if (key === 'app') {
-      return getTheme() === 'light' ? THEMES.light : THEMES.kali;
-    }
-    return THEMES[key] || THEMES.kali;
-  }
-
-  function applyActiveTheme() {
-    const theme = resolveThemeObj(activeThemeKey);
-    tabs.forEach(t => {
-      t.term.options.theme = theme;
-    });
+  function applyThemeSurface() {
+    const theme = resolveThemeObj();
+    controlsRow.style.backgroundColor = theme.toolbarBg;
+    controlsRow.style.borderColor = theme.toolbarBorder;
+    controlsRow.style.color = theme.toolbarFg;
+    mobileKeyBar.style.backgroundColor = theme.toolbarBg;
+    mobileKeyBar.style.borderColor = theme.toolbarBorder;
     terminalCard.style.backgroundColor = theme.background;
-    renderControls();
+    terminalCard.style.borderColor = theme.toolbarBorder;
   }
 
-  // Set theme
   function changeTheme(themeKey) {
     if (!THEMES[themeKey]) return;
     activeThemeKey = themeKey;
-    applyActiveTheme();
+    applyThemeSurface();
+    renderControls();
+    const active = getActiveTab();
+    if (active) connectTab(active);
   }
 
-  // Paste snippet safely without Enter
   function pasteSnippet(cmd) {
     const tab = getActiveTab();
-    if (!tab) return;
-    tab.term.paste(cmd);
-    tab.term.focus();
+    if (!tab?.client || tab.status !== 'connected') {
+      toast({ title: 'Not connected', description: 'Terminal belum terhubung ke server Kali.', kind: 'error' });
+      return;
+    }
+    sendTextToClient(tab.client, cmd);
     showSnippets = false;
     renderControls();
-    toast.info('Snippet pasted — press Enter to run');
+    toast({ title: 'Snippet inserted', description: 'Tekan Enter di terminal untuk menjalankan.', kind: 'info' });
   }
 
-  // Mobile keys handlers
-  function sendMobileKey(seq) {
+  function sendMobileKey(action) {
     const tab = getActiveTab();
-    if (!tab || !tab.shell) return;
-    tab.shell.handleData(seq);
-    tab.term.focus();
+    if (!tab?.client || tab.status !== 'connected') return;
+    if (action.ctrl) {
+      sendCtrlKey(tab.client, action.ctrl);
+    } else if (action.keysym) {
+      tab.client.sendKeyEvent(1, action.keysym);
+      tab.client.sendKeyEvent(0, action.keysym);
+    } else if (action.text) {
+      sendTextToClient(tab.client, action.text);
+    }
   }
 
-  // Toggle fullscreen
   function toggleFullscreen() {
     if (!document.fullscreenElement) {
       terminalCard.requestFullscreen?.().then(() => {
         isFullscreen = true;
         renderControls();
+        setTimeout(() => sendTabSize(getActiveTab()), 150);
       }).catch(() => {});
     } else {
       document.exitFullscreen?.().then(() => {
         isFullscreen = false;
         renderControls();
+        setTimeout(() => sendTabSize(getActiveTab()), 150);
       }).catch(() => {});
     }
   }
 
-  document.addEventListener('fullscreenchange', () => {
-    isFullscreen = !!document.fullscreenElement;
-    renderControls();
+  // Single global keyboard handler routed to the active live SSH tab
+  const keyboard = new Guacamole.Keyboard(document);
+  keyboard.onkeydown = (keysym) => {
+    if (destroyed) return true;
+    const tag = document.activeElement?.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
     const tab = getActiveTab();
-    if (tab) {
-      setTimeout(() => tab.fitAddon.fit(), 100);
-    }
-  });
+    if (!tab?.client || tab.status !== 'connected') return true;
+    tab.client.sendKeyEvent(1, keysym);
+    return false;
+  };
+  keyboard.onkeyup = (keysym) => {
+    if (destroyed) return;
+    const tag = document.activeElement?.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    const tab = getActiveTab();
+    if (!tab?.client || tab.status !== 'connected') return;
+    tab.client.sendKeyEvent(0, keysym);
+  };
 
-  // Window / container resize observer
+  // Resize observer so live Kali SSH fills 100% of the terminal container smoothly
   const resizeObserver = new ResizeObserver(() => {
     const tab = getActiveTab();
-    if (tab) {
-      tab.fitAddon.fit();
-      sendResize(tab);
-    }
+    if (!tab) return;
+    if (tab.resizeTimer) clearTimeout(tab.resizeTimer);
+    tab.resizeTimer = setTimeout(() => sendTabSize(tab), 140);
   });
   resizeObserver.observe(terminalCard);
 
-  // Components UI DOM nodes with unified theme surface & mobile-only extra keys
-  const headerContainer = h('div', { class: 'pb-2' });
-  const controlsRow = h('div', { class: 'flex flex-wrap items-center justify-between gap-3 border-b px-4 py-2.5 text-xs transition-colors' });
-  const searchBarEl = h('div', { class: 'hidden border-b px-4 py-2 items-center gap-2 text-xs transition-colors' });
-  // Extra keys bar: mobile only ((pointer: coarse) or < 768px), strictly hidden on desktop
-  const mobileKeyBar = h('div', { class: 'hidden coarse:flex max-md:flex items-center gap-1.5 overflow-x-auto border-t px-3 py-1.5 text-xs text-fg' });
+  const onFsChange = () => {
+    isFullscreen = !!document.fullscreenElement;
+    renderControls();
+    setTimeout(() => sendTabSize(getActiveTab()), 150);
+  };
+  document.addEventListener('fullscreenchange', onFsChange);
 
   function renderHeader() {
     headerContainer.innerHTML = '';
-    const vm = vms.find((v) => v.id === selectedVmId) || vms[0];
+    const vm = getSelectedVm();
     headerContainer.appendChild(
       pageHeader({
         title: 'Web Terminal',
-        description: mode === 'ssh'
-          ? 'Live Kali Linux SSH terminal connected via encrypted Guacamole gateway.'
-          : 'Simulated interactive shell (xterm.js) for offline practice.',
-        actions: h('div', { class: 'flex flex-wrap items-center gap-2' },
-          button({
-            variant: mode === 'ssh' ? 'primary' : 'secondary',
-            size: 'sm',
-            icon: 'terminal',
-            label: 'Live Kali SSH',
-            onClick: () => switchMode('ssh')
-          }),
-          button({
-            variant: mode === 'sim' ? 'primary' : 'secondary',
-            size: 'sm',
-            icon: 'cpu',
-            label: 'Simulated Shell',
-            onClick: () => switchMode('sim')
-          }),
+        description: 'Native Linux interactive shell connected directly to your lab VM over an isolated SSH PTY gateway.',
+        actions: h('div', { class: 'flex items-center gap-2' },
           button({
             variant: 'secondary',
             size: 'sm',
             icon: 'monitor',
             label: 'Open Desktop',
-            onClick: () => navigate(vm ? `/desktop?vm=${encodeURIComponent(vm.id)}` : '/desktop')
+            onClick: () => navigate(`/desktop?vm=${encodeURIComponent(vm.id)}`)
           }),
           button({
-            variant: 'outline',
+            variant: 'secondary',
             size: 'sm',
             icon: 'refresh-cw',
             label: 'Reconnect',
-            onClick: () => (mode === 'ssh' ? connectLiveSsh() : reconnectActiveTab())
-          }),
-          mode === 'sim'
-            ? button({
-                variant: 'outline',
-                size: 'sm',
-                icon: 'download',
-                label: 'Export Log',
-                onClick: downloadSessionLog
-              })
-            : null
+            onClick: reconnectActiveTab
+          })
         )
       })
     );
@@ -627,389 +540,258 @@ export function TerminalPage({ params, query } = {}) {
 
   function renderControls() {
     controlsRow.innerHTML = '';
+    applyThemeSurface();
+
     const activeTab = getActiveTab();
-    const theme = THEMES[activeThemeKey] || THEMES.kali;
+    const vm = getSelectedVm();
 
-    // Apply unified theme surface colors
-    controlsRow.style.backgroundColor = theme.toolbarBg;
-    controlsRow.style.borderColor = theme.toolbarBorder;
-    controlsRow.style.color = theme.toolbarFg;
-    searchBarEl.style.backgroundColor = theme.toolbarBg;
-    searchBarEl.style.borderColor = theme.toolbarBorder;
-    mobileKeyBar.style.backgroundColor = theme.toolbarBg;
-    mobileKeyBar.style.borderColor = theme.toolbarBorder;
-    terminalCard.style.backgroundColor = theme.background;
-    terminalCard.style.borderColor = theme.toolbarBorder;
-
-    // LEFT ZONE: VM Selector + Tabs
+    // LEFT ZONE: VM Selector + Multi-Tab Bar (matching demo screenshot)
     const leftZone = h('div', { class: 'flex items-center gap-3 overflow-x-auto min-w-0' },
-      // VM Picker
       h('div', { class: 'flex items-center gap-1.5 border-r border-line pr-3 shrink-0' },
         icon('server', 'w-3.5 h-3.5 text-muted'),
         h('select', {
           class: 'bg-transparent text-fg text-xs font-medium outline-none cursor-pointer pr-1',
           onChange: (e) => {
             selectedVmId = e.target.value;
-            if (mode === 'ssh') {
-              renderHeader();
-              connectLiveSsh();
-              return;
-            }
-            tabs.forEach(t => {
-              try { t.term.dispose(); } catch {}
+            tabs.forEach((t) => {
+              disconnectTab(t);
+              if (t.container.parentElement) t.container.parentElement.removeChild(t.container);
             });
             tabs = [];
-            terminalStackEl.innerHTML = '';
+            renderHeader();
             createNewTab();
           }
         },
-          vms.map(v => h('option', {
+          vms.map((v) => h('option', {
             value: v.id,
-            selected: v.id === selectedVmId,
+            selected: v.id === vm.id,
             class: 'bg-surface text-fg'
           }, `${v.name} (${v.ip || '10.10.1.5'})`))
         )
       ),
-
-      // Tab Pills
-      h('div', { class: 'flex items-center gap-1 overflow-x-auto' },
-        tabs.map(tab => {
+      h('div', { class: 'flex items-center gap-1' },
+        ...tabs.map((tab) => {
           const isActive = tab.id === activeTabId;
-          return h('div', {
+          return h('button', {
+            type: 'button',
             class: cx(
-              'group flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-mono transition-all cursor-pointer select-none',
+              'group flex items-center gap-2 rounded-md px-2.5 py-1 text-xs font-mono transition-colors cursor-pointer',
               isActive
-                ? 'bg-raised text-fg font-semibold shadow-sm border border-line'
+                ? 'bg-raised text-fg font-semibold border border-line'
                 : 'text-muted hover:text-fg hover:bg-surface'
             ),
             onClick: () => switchTab(tab.id)
           },
-            h('span', {
-              class: cx(
-                'w-1.5 h-1.5 rounded-full shrink-0',
-                tab.status === 'connected' ? 'bg-[var(--success)]' : tab.status === 'connecting' ? 'bg-[var(--warning)] animate-pulse' : 'bg-[var(--danger)]'
-              )
-            }),
-            h('span', { class: 'truncate max-w-[100px]' }, tab.title),
-            tabs.length > 1 && h('button', {
-              type: 'button',
-              class: 'opacity-0 group-hover:opacity-100 text-muted hover:text-[var(--danger-text)] p-0.5 rounded transition-opacity',
-              onClick: (e) => closeTab(tab.id, e),
-              title: 'Close tab'
-            }, icon('x', 'w-3 h-3'))
+            h('span', {}, tab.title),
+            tabs.length > 1
+              ? h('span', {
+                  class: 'opacity-60 hover:opacity-100 text-muted hover:text-danger',
+                  onClick: (e) => closeTab(tab.id, e)
+                }, '×')
+              : null
           );
         }),
         h('button', {
           type: 'button',
-          class: 'flex items-center justify-center p-1 rounded hover:bg-surface text-muted hover:text-fg transition-colors',
-          onClick: () => createNewTab(),
-          title: 'New terminal tab'
+          title: 'New SSH Terminal Tab',
+          'aria-label': 'New Terminal Tab',
+          class: 'flex h-6 w-6 items-center justify-center rounded-md text-muted hover:bg-raised hover:text-fg transition-colors cursor-pointer',
+          onClick: () => createNewTab()
         }, icon('plus', 'w-3.5 h-3.5'))
       )
     );
 
-    // RIGHT ZONE: Status Pill + Snippets + Actions
-    const statusPill = h('div', { class: 'flex items-center gap-2 border-r border-line pr-3 shrink-0' },
-      h('span', {
-        class: cx(
-          'w-2 h-2 rounded-full',
-          activeTab?.status === 'connected' ? 'bg-[var(--success)]' :
-          activeTab?.status === 'connecting' ? 'bg-[var(--warning)] animate-pulse' : 'bg-[var(--danger)]'
-        )
-      }),
-      h('span', { class: 'font-mono text-[11px] text-muted font-medium' },
-        activeTab?.status === 'connected' ? `Connected (${activeTab.latency || 12}ms)` :
-        activeTab?.status === 'connecting' ? 'Connecting...' : 'Disconnected'
-      )
-    );
+    // Status pill matching demo UI ("Connected (12ms)")
+    const statusText = activeTab?.status === 'connected'
+      ? (activeTab.latency ? `Connected (${activeTab.latency}ms)` : 'Connected')
+      : activeTab?.status === 'connecting'
+        ? 'Connecting...'
+        : 'Disconnected';
+    const statusColor = activeTab?.status === 'connected'
+      ? 'text-accent'
+      : activeTab?.status === 'connecting'
+        ? 'text-muted'
+        : 'text-danger';
 
-    // Actions & Tools
-    const actionsZone = h('div', { class: 'flex items-center gap-1.5 shrink-0 relative' },
-      // Snippets dropdown button
-      h('div', { class: 'relative' },
-        button({
-          variant: showSnippets ? 'primary' : 'outline',
-          size: 'xs',
-          icon: 'terminal',
-          label: 'Snippets',
-          onClick: () => {
-            showSnippets = !showSnippets;
-            renderControls();
-          }
-        }),
-        showSnippets && h('div', {
-          class: 'absolute right-0 top-full mt-2 w-72 rounded-lg border border-line bg-surface p-2 shadow-2xl z-50 space-y-1'
-        },
-          h('div', { class: 'px-2 py-1 text-[11px] font-semibold text-muted uppercase tracking-wider border-b border-line mb-1' }, 'Quick Pentest Snippets'),
-          SNIPPETS.map(snip => h('button', {
-            type: 'button',
-            class: 'w-full text-left px-2 py-1.5 rounded hover:bg-raised transition-colors flex flex-col gap-0.5 group cursor-pointer',
-            onClick: () => pasteSnippet(snip.cmd)
-          },
-            h('span', { class: 'font-medium text-xs text-fg group-hover:text-accent' }, snip.label),
-            h('span', { class: 'font-mono text-[10px] text-muted truncate' }, snip.cmd)
-          ))
-        )
-      ),
-
-      // Search button
-      button({
-        variant: showSearch ? 'primary' : 'ghost',
-        size: 'xs',
-        icon: 'search',
-        title: 'Search in terminal (Ctrl+Shift+F)',
-        onClick: () => {
-          showSearch = !showSearch;
-          searchBarEl.style.display = showSearch ? 'flex' : 'none';
-          if (showSearch) {
-            const input = searchBarEl.querySelector('input');
-            input?.focus();
-          }
-        }
-      }),
-
-      // Copy & Paste
-      button({
-        variant: 'ghost',
-        size: 'xs',
-        icon: 'copy',
-        title: 'Copy selection (Ctrl+C / Selection)',
-        onClick: copySelection
-      }),
-      button({
-        variant: 'ghost',
-        size: 'xs',
-        icon: 'clipboard',
-        title: 'Paste from clipboard',
-        onClick: pasteClipboard
-      }),
-      button({
-        variant: 'ghost',
-        size: 'xs',
-        icon: 'trash-2',
-        title: 'Clear terminal screen',
-        onClick: clearTerminal
-      }),
-
-      // Font size - / +
-      h('div', { class: 'flex items-center border border-line rounded px-1' },
-        h('button', {
-          type: 'button',
-          class: 'px-1 text-muted hover:text-fg font-bold',
-          onClick: () => changeFontSize(-1),
-          title: 'Decrease font size'
-        }, '-'),
-        h('span', { class: 'font-mono text-[10px] text-muted px-1' }, `${fontSize}px`),
-        h('button', {
-          type: 'button',
-          class: 'px-1 text-muted hover:text-fg font-bold',
-          onClick: () => changeFontSize(1),
-          title: 'Increase font size'
-        }, '+')
-      ),
-
-      // Prompt Style Selector (A3)
-      h('select', {
-        class: 'bg-transparent text-muted hover:text-fg border border-line rounded px-1.5 py-0.5 text-[11px] outline-none cursor-pointer',
-        value: promptStyle,
-        title: 'Shell prompt style',
-        onChange: (e) => {
-          promptStyle = e.target.value;
-          const tab = getActiveTab();
-          tab?.shell?.refreshPrompt();
-          toast.info(`Prompt switched to ${promptStyle === 'kali' ? 'Kali Two-Line' : 'Classic Debian'}`);
+    // Snippets dropdown
+    const snippetsWrapper = h('div', { class: 'relative' },
+      h('button', {
+        type: 'button',
+        class: 'flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted hover:bg-raised hover:text-fg transition-colors cursor-pointer',
+        onClick: (e) => {
+          e.stopPropagation();
+          showSnippets = !showSnippets;
           renderControls();
         }
-      },
-        h('option', { value: 'classic', selected: promptStyle === 'classic', class: 'bg-surface text-fg' }, 'Prompt: Classic'),
-        h('option', { value: 'kali', selected: promptStyle === 'kali', class: 'bg-surface text-fg' }, 'Prompt: Kali 2-Line')
-      ),
+      }, icon('terminal', 'w-3.5 h-3.5'), h('span', {}, 'Snippets')),
+      showSnippets
+        ? h('div', {
+            class: 'absolute right-0 top-8 z-30 w-72 rounded-xl border border-line bg-surface p-1.5 shadow-2xl space-y-0.5'
+          },
+            SNIPPETS.map((s) =>
+              h('button', {
+                type: 'button',
+                class: 'w-full rounded-lg px-2.5 py-2 text-left hover:bg-raised transition-colors cursor-pointer',
+                onClick: () => pasteSnippet(s.cmd)
+              },
+                h('div', { class: 'text-xs font-medium text-fg' }, s.label),
+                h('div', { class: 'font-mono text-[11px] text-accent truncate mt-0.5' }, s.cmd)
+              )
+            )
+          )
+        : null
+    );
 
-      // Theme Picker
+    // RIGHT ZONE: Status, Snippets, Copy, Paste, Clear, Font Size, Theme, Fullscreen
+    const rightZone = h('div', { class: 'flex flex-wrap items-center gap-2 shrink-0' },
+      h('span', { class: `font-mono text-[11px] pr-2 border-r border-line ${statusColor}` }, statusText),
+      snippetsWrapper,
+      h('button', {
+        type: 'button',
+        title: 'Copy Selection',
+        'aria-label': 'Copy Selection',
+        class: 'flex h-7 w-7 items-center justify-center rounded-md text-muted hover:bg-raised hover:text-fg transition-colors cursor-pointer',
+        onClick: copySelection
+      }, icon('copy', 'w-3.5 h-3.5')),
+      h('button', {
+        type: 'button',
+        title: 'Paste Clipboard',
+        'aria-label': 'Paste Clipboard',
+        class: 'flex h-7 w-7 items-center justify-center rounded-md text-muted hover:bg-raised hover:text-fg transition-colors cursor-pointer',
+        onClick: pasteClipboard
+      }, icon('clipboard-paste', 'w-3.5 h-3.5')),
+      h('button', {
+        type: 'button',
+        title: 'Clear Terminal (Ctrl+L)',
+        'aria-label': 'Clear Terminal',
+        class: 'flex h-7 w-7 items-center justify-center rounded-md text-muted hover:bg-raised hover:text-fg transition-colors cursor-pointer',
+        onClick: clearTerminal
+      }, icon('trash-2', 'w-3.5 h-3.5')),
+      h('div', { class: 'flex items-center gap-1 rounded-md border border-line px-1.5 py-0.5 font-mono text-[11px] text-muted' },
+        h('button', {
+          type: 'button',
+          class: 'px-1 hover:text-fg cursor-pointer',
+          onClick: () => changeFontSize(-1)
+        }, '−'),
+        h('span', { class: 'px-1 text-fg' }, `${fontSize}px`),
+        h('button', {
+          type: 'button',
+          class: 'px-1 hover:text-fg cursor-pointer',
+          onClick: () => changeFontSize(1)
+        }, '+')
+      ),
       h('select', {
-        class: 'bg-transparent text-muted hover:text-fg border border-line rounded px-1.5 py-0.5 text-[11px] outline-none cursor-pointer',
-        value: activeThemeKey,
+        'aria-label': 'Terminal Theme',
+        class: 'rounded-md border border-line bg-surface px-2 py-1 text-xs text-fg outline-none cursor-pointer',
         onChange: (e) => changeTheme(e.target.value)
       },
-        Object.values(THEMES).map(t => h('option', {
-          value: t.id,
-          selected: t.id === activeThemeKey,
-          class: 'bg-surface text-fg'
-        }, t.name))
+        Object.values(THEMES).map((th) =>
+          h('option', {
+            value: th.id,
+            selected: th.id === activeThemeKey,
+            class: 'bg-surface text-fg'
+          }, th.name)
+        )
       ),
-
-      // Fullscreen
-      button({
-        variant: 'ghost',
-        size: 'xs',
-        icon: isFullscreen ? 'minimize-2' : 'maximize-2',
+      h('button', {
+        type: 'button',
         title: isFullscreen ? 'Exit Fullscreen' : 'Fullscreen',
+        'aria-label': 'Toggle Fullscreen',
+        class: 'flex h-7 w-7 items-center justify-center rounded-md text-muted hover:bg-raised hover:text-fg transition-colors cursor-pointer',
         onClick: toggleFullscreen
-      })
+      }, icon(isFullscreen ? 'minimize-2' : 'maximize-2', 'w-3.5 h-3.5'))
     );
 
-    controlsRow.appendChild(leftZone);
-    controlsRow.appendChild(h('div', { class: 'flex items-center gap-3 shrink-0' }, statusPill, actionsZone));
+    controlsRow.append(leftZone, rightZone);
   }
 
-  // Setup Search Bar
-  function setupSearchBar() {
-    searchBarEl.innerHTML = '';
-    const input = h('input', {
-      type: 'text',
-      placeholder: 'Search in terminal buffer...',
-      class: 'flex-1 bg-canvas border border-line rounded px-2.5 py-1 text-xs text-fg outline-none focus:border-accent',
-      onInput: (e) => {
-        searchQuery = e.target.value;
-        const tab = getActiveTab();
-        if (tab && searchQuery) {
-          tab.searchAddon.findNext(searchQuery);
-        }
-      },
-      onKeyDown: (e) => {
-        if (e.key === 'Enter') {
-          const tab = getActiveTab();
-          if (tab && searchQuery) {
-            if (e.shiftKey) tab.searchAddon.findPrevious(searchQuery);
-            else tab.searchAddon.findNext(searchQuery);
-          }
-        } else if (e.key === 'Escape') {
-          showSearch = false;
-          searchBarEl.style.display = 'none';
-        }
-      }
-    });
-
-    searchBarEl.appendChild(icon('search', 'w-3.5 h-3.5 text-muted shrink-0'));
-    searchBarEl.appendChild(input);
-    searchBarEl.appendChild(
-      button({
-        variant: 'ghost',
-        size: 'xs',
-        label: 'Prev',
-        onClick: () => {
-          const tab = getActiveTab();
-          if (tab && searchQuery) tab.searchAddon.findPrevious(searchQuery);
-        }
-      })
-    );
-    searchBarEl.appendChild(
-      button({
-        variant: 'ghost',
-        size: 'xs',
-        label: 'Next',
-        onClick: () => {
-          const tab = getActiveTab();
-          if (tab && searchQuery) tab.searchAddon.findNext(searchQuery);
-        }
-      })
-    );
-    searchBarEl.appendChild(
-      button({
-        variant: 'ghost',
-        size: 'xs',
-        icon: 'x',
-        onClick: () => {
-          showSearch = false;
-          searchBarEl.style.display = 'none';
-        }
-      })
-    );
-  }
-
-  // Setup Mobile Helper Keys Bar
   function setupMobileKeys() {
     mobileKeyBar.innerHTML = '';
     const keys = [
-      { label: 'ESC', seq: '\x1b' },
-      { label: 'TAB', seq: '\t' },
-      { label: 'CTRL-C', seq: '\x03' },
-      { label: 'CTRL-D', seq: '\x04' },
-      { label: 'CTRL-Z', seq: '\x1a' },
-      { label: '▲', seq: '\x1b[A' },
-      { label: '▼', seq: '\x1b[B' },
-      { label: '◀', seq: '\x1b[D' },
-      { label: '▶', seq: '\x1b[C' },
-      { label: '|', seq: '|' },
-      { label: '~', seq: '~' },
-      { label: '/', seq: '/' },
-      { label: '-', seq: '-' }
+      { label: 'ESC', keysym: 0xFF1B },
+      { label: 'TAB', keysym: 0xFF09 },
+      { label: 'CTRL-C', ctrl: 0x0063 },
+      { label: 'CTRL-D', ctrl: 0x0064 },
+      { label: 'CTRL-Z', ctrl: 0x007A },
+      { label: '▲', keysym: 0xFF52 },
+      { label: '▼', keysym: 0xFF54 },
+      { label: '◀', keysym: 0xFF51 },
+      { label: '▶', keysym: 0xFF53 },
+      { label: '|', text: '|' },
+      { label: '~', text: '~' },
+      { label: '/', text: '/' },
+      { label: '-', text: '-' }
     ];
 
-    keys.forEach(k => {
+    keys.forEach((k) => {
       mobileKeyBar.appendChild(
         h('button', {
           type: 'button',
-          class: 'px-2 py-1 rounded bg-surface border border-line text-[11px] font-mono text-fg hover:bg-raised active:bg-accent active:text-[var(--text-inverse)] transition-all shrink-0',
-          onClick: () => sendMobileKey(k.seq)
+          class: 'px-2 py-1 rounded bg-surface border border-line text-[11px] font-mono text-fg hover:bg-raised transition-all shrink-0 cursor-pointer',
+          onClick: () => sendMobileKey(k)
         }, k.label)
       );
     });
   }
 
-  // Cleanup on route change
-  const unsubTheme = subscribeTheme(() => {
-    if (activeThemeKey === 'app') applyActiveTheme();
-  });
-  onCleanup(unsubTheme);
-
-  onCleanup(() => {
-    destroyed = true;
-    disconnectLiveSsh();
-    resizeObserver.disconnect();
-    tabs.forEach(tab => {
-      try { tab.term.dispose(); } catch {}
-    });
-    tabs = [];
-  });
-
-  const demoBanner = h('div', {
-    role: 'status',
-    'data-demo-banner': 'true',
-    class: 'flex items-center justify-between gap-2 px-3 py-1.5 text-xs font-mono border-b border-line bg-surface text-muted'
-  });
-
-  function renderBanner() {
-    demoBanner.innerHTML = '';
-    const vm = vms.find((v) => v.id === selectedVmId) || vms[0] || { name: 'kali-lab-01' };
-    if (mode === 'ssh') {
-      const toneClass = sshStatus === 'Connected' ? 'text-accent' : sshError ? 'text-danger' : 'text-muted';
-      demoBanner.append(
-        h('span', { class: 'flex items-center gap-2 font-medium text-fg' },
-          icon('terminal', 'w-3.5 h-3.5 text-accent'),
-          `${vm.name.toUpperCase()} // LIVE SSH (Port 22)`
-        ),
-        h('span', { class: `text-[11px] font-mono ${toneClass}` }, `Status: ${sshStatus}`)
-      );
-    } else {
-      demoBanner.append(
-        h('span', { class: 'flex items-center gap-2 font-medium text-fg' },
-          icon('shield-alert', 'w-3.5 h-3.5 text-accent'),
-          DEMO_BANNER_TEXT
-        ),
-        h('span', { class: 'text-[11px] text-muted' }, 'In-memory allow-listed shell · /home/student')
-      );
+  async function loadVms() {
+    try {
+      const list = await api.vms.list().catch(() => []);
+      const running = list.filter((v) => v.status === 'running');
+      vms = running.length ? running : (list.length ? list : [
+        { id: 'vm-1', name: 'kali-lab-01', ip: '10.10.1.5', status: 'running' }
+      ]);
+      if (!selectedVmId && vms.length > 0) {
+        selectedVmId = vms[0].id;
+      }
+      renderHeader();
+      renderControls();
+      if (tabs.length === 0) {
+        createNewTab();
+      }
+    } catch {
+      toast({ title: 'Error', description: 'Failed to load virtual machines', kind: 'error' });
     }
   }
 
-  // Assemble the component
-  renderBanner();
-  renderHeader();
-  renderControls();
-  setupSearchBar();
-  setupMobileKeys();
+  const closeSnippetsOnOutside = () => {
+    if (showSnippets) {
+      showSnippets = false;
+      renderControls();
+    }
+  };
+  document.addEventListener('click', closeSnippetsOnOutside);
 
-  terminalCard.appendChild(demoBanner);
+  const unsubTheme = subscribeTheme(() => {
+    if (activeThemeKey === 'app') {
+      applyThemeSurface();
+      const active = getActiveTab();
+      if (active) connectTab(active);
+    }
+  });
+
+  onCleanup(() => {
+    destroyed = true;
+    unsubTheme();
+    document.removeEventListener('click', closeSnippetsOnOutside);
+    document.removeEventListener('fullscreenchange', onFsChange);
+    resizeObserver.disconnect();
+    keyboard.onkeydown = null;
+    keyboard.onkeyup = null;
+    tabs.forEach((tab) => disconnectTab(tab));
+    tabs = [];
+  });
+
+  setupMobileKeys();
+  applyThemeSurface();
+
   terminalCard.appendChild(controlsRow);
-  terminalCard.appendChild(searchBarEl);
-  terminalCard.appendChild(liveSshWrapper);
   terminalCard.appendChild(terminalStackEl);
   terminalCard.appendChild(mobileKeyBar);
 
   host.appendChild(headerContainer);
   host.appendChild(terminalCard);
 
-  // Initialize
   loadVms();
 
   return PageContainer({ variant: 'full' }, host);
