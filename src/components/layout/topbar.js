@@ -1,6 +1,7 @@
 import { h, icon, cx } from '../../lib/dom.js';
 import { t, getLang, toggleLang } from '../../lib/i18n.js';
-import { useAuth, viewAs, setTenant, signOut } from '../../lib/auth.js';
+import { useAuth, setTenant, signOut } from '../../lib/auth.js';
+import { navigate } from '../../lib/router.js';
 import { toggleTheme } from '../../lib/theme.js';
 import { createThemeToggle } from './header/theme-toggle.js';
 import { initials } from '../../lib/format.js';
@@ -93,20 +94,20 @@ function accountMenu(auth) {
       },
       { type: 'label', label: user.email },
       { type: 'separator' },
+      ...(user.role === 'admin'
+        ? [{
+            label: 'Manage Users & Passwords',
+            icon: 'users',
+            onSelect: () => navigate('/admin/users')
+          }]
+        : []),
       {
-        label: 'Security & 2FA',
+        label: 'Security & Compliance',
         icon: 'shield',
-        onSelect: () => window.location.href = '/compliance'
+        onSelect: () => navigate('/compliance')
       },
       { type: 'separator' },
-      { type: 'label', label: `${t('top.viewAs')} (Dev)` },
-      ...['admin', 'instructor', 'student'].map((role) => ({
-        label: t(`role.${role}`),
-        checked: role === user.role,
-        onSelect: () => viewAs(role)
-      })),
-      { type: 'separator' },
-      { label: t('top.signout'), icon: 'log-out', onSelect: signOut }
+      { label: t('top.signout'), icon: 'log-out', onSelect: () => signOut() }
     ]
   });
 }

@@ -1,6 +1,7 @@
+import Guacamole from 'guacamole-common-js';
 import { h, icon, cx } from '../../lib/dom.js';
 import { api } from '../../lib/api.js';
-import { onCleanup } from '../../lib/router.js';
+import { navigate, onCleanup } from '../../lib/router.js';
 import { subscribeTheme, getTheme } from '../../lib/theme.js';
 import { button } from '../../components/ui/button.js';
 import { badge } from '../../components/ui/badge.js';
@@ -29,9 +30,16 @@ const SNIPPETS = [
   { label: 'Metasploit Console', cmd: 'msfconsole -q', desc: 'Launch framework console' }
 ];
 
-export function TerminalPage(params = {}) {
+export function TerminalPage({ params, query } = {}) {
   let vms = [];
-  let selectedVmId = params?.id || null;
+  let selectedVmId = query?.get('vm') || params?.id || null;
+  let mode = process.env.NEXT_PUBLIC_GUAC_WS_URL ? 'ssh' : 'sim'; // 'ssh' | 'sim'
+  let sshStatus = 'Connecting...';
+  let sshError = null;
+  let sshClient = null;
+  let sshKeyboard = null;
+  let sshResizeCleanup = null;
+  let destroyed = false;
   let activeThemeKey = 'kali';
   let promptStyle = 'classic'; // 'classic' or 'kali'
   let fontSize = 13;
@@ -47,6 +55,15 @@ export function TerminalPage(params = {}) {
 
   const host = h('div', { class: 'space-y-4 font-sans select-none pb-8' });
   const terminalStackEl = h('div', { class: 'relative w-full h-full flex-1' });
+  const liveSshMount = h('div', {
+    class: 'relative z-0 isolate flex-1 w-full h-full overflow-hidden flex items-center justify-center'
+  });
+  const liveSshOverlay = h('div', {
+    class: 'hidden absolute inset-0 z-10 flex items-center justify-center p-6 bg-canvas/90'
+  });
+  const liveSshWrapper = h('div', {
+    class: 'relative flex-1 w-full h-full flex flex-col overflow-hidden'
+  }, liveSshMount, liveSshOverlay);
 
   // Outer terminal container wrapper - unified theme-matched surface
   const terminalCard = h('div', {
@@ -73,12 +90,206 @@ export function TerminalPage(params = {}) {
       if (!selectedVmId && vms.length > 0) {
         selectedVmId = vms[0].id;
       }
+      renderHeader();
       renderControls();
-      if (tabs.length === 0 && selectedVmId) {
+      syncModeView();
+      if (mode === 'ssh') {
+        connectLiveSsh();
+      } else if (tabs.length === 0 && selectedVmId) {
         createNewTab();
       }
     } catch (err) {
       toast.error('Failed to load virtual machines');
+    }
+  }
+
+  function disconnectLiveSsh() {
+    if (sshResizeCleanup) {
+      sshResizeCleanup();
+      sshResizeCleanup = null;
+    }
+    if (sshKeyboard) {
+      sshKeyboard.onkeydown = null;
+      sshKeyboard.onkeyup = null;
+      sshKeyboard = null;
+    }
+    if (sshClient) {
+      try { sshClient.disconnect(); } catch { /* ignore */ }
+      sshClient = null;
+    }
+  }
+
+  function renderSshOverlay() {
+    liveSshOverlay.innerHTML = '';
+    if (!sshError) {
+      liveSshOverlay.classList.add('hidden');
+      return;
+    }
+    const vm = vms.find((v) => v.id === selectedVmId) || vms[0] || { id: 'vm-1', name: 'kali-lab-01' };
+    liveSshOverlay.classList.remove('hidden');
+    liveSshOverlay.appendChild(
+      h('div', { class: 'max-w-lg w-full rounded-xl border border-line bg-surface p-5 space-y-3 text-xs text-fg' },
+        h('div', { class: 'flex items-center gap-2 font-semibold text-sm text-danger' },
+          icon('alert-circle', 'w-4 h-4'),
+          'Live SSH Terminal Belum Aktif di Container'
+        ),
+        h('p', { class: 'text-muted leading-relaxed' },
+          `Koneksi SSH (port 22) ke ${vm.name} gagal (${sshError}). Pastikan openssh-server sudah terpasang dan berjalan di dalam container Kali Linux.`
+        ),
+        h('pre', { class: 'rounded-lg border border-line bg-canvas p-3 font-mono text-[11px] text-accent overflow-x-auto select-text' },
+          'sudo apt update && sudo apt install -y openssh-server iputils-ping && sudo service ssh start'
+        ),
+        h('div', { class: 'flex flex-wrap gap-2 pt-1' },
+          button({ label: 'Retry Live SSH', icon: 'refresh-cw', variant: 'primary', size: 'sm', onClick: () => connectLiveSsh() }),
+          button({ label: 'Open Kali Desktop', icon: 'monitor', variant: 'secondary', size: 'sm', onClick: () => navigate(`/desktop?vm=${encodeURIComponent(vm.id)}`) }),
+          button({ label: 'Use Simulated Shell', icon: 'terminal', variant: 'ghost', size: 'sm', onClick: () => switchMode('sim') })
+        )
+      )
+    );
+  }
+
+  function syncModeView() {
+    if (mode === 'ssh') {
+      liveSshWrapper.style.display = 'flex';
+      terminalStackEl.style.display = 'none';
+      mobileKeyBar.style.display = 'none';
+    } else {
+      liveSshWrapper.style.display = 'none';
+      terminalStackEl.style.display = 'block';
+      mobileKeyBar.style.display = '';
+      if (tabs.length === 0 && selectedVmId) {
+        createNewTab();
+      } else {
+        const active = getActiveTab();
+        if (active) {
+          requestAnimationFrame(() => {
+            active.fitAddon.fit();
+            active.term.focus();
+          });
+        }
+      }
+    }
+    renderBanner();
+    renderHeader();
+  }
+
+  function switchMode(nextMode) {
+    if (mode === nextMode) return;
+    mode = nextMode;
+    if (mode === 'ssh') {
+      syncModeView();
+      connectLiveSsh();
+    } else {
+      disconnectLiveSsh();
+      syncModeView();
+    }
+  }
+
+  async function connectLiveSsh() {
+    disconnectLiveSsh();
+    if (destroyed || mode !== 'ssh') return;
+
+    const vm = vms.find((v) => v.id === selectedVmId) || vms[0] || { id: 'vm-1', name: 'kali-lab-01' };
+    sshStatus = 'Connecting...';
+    sshError = null;
+    renderBanner();
+    renderSshOverlay();
+
+    const wsBase = process.env.NEXT_PUBLIC_GUAC_WS_URL;
+    if (!wsBase) {
+      sshError = 'NEXT_PUBLIC_GUAC_WS_URL not configured';
+      sshStatus = 'Unavailable';
+      renderBanner();
+      renderSshOverlay();
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/guac-token?vm=${encodeURIComponent(vm.id)}&protocol=ssh`, {
+        credentials: 'same-origin'
+      });
+      if (res.status === 401) {
+        navigate('/login', { replace: true });
+        return;
+      }
+      const data = await res.json();
+      if (!res.ok || !data?.token) {
+        throw new Error(data?.error || 'Failed to obtain SSH token');
+      }
+      if (destroyed || mode !== 'ssh') return;
+
+      const baseWsUrl = `${wsBase.replace(/\/+$/, '')}/`;
+      const tunnel = new Guacamole.WebSocketTunnel(baseWsUrl);
+
+      tunnel.onerror = (err) => {
+        if (destroyed || mode !== 'ssh') return;
+        sshError = `Tunnel error (code=${err?.code}): ${err?.message || 'connection failed'}`;
+        sshStatus = 'Error';
+        renderBanner();
+        renderSshOverlay();
+      };
+
+      const client = new Guacamole.Client(tunnel);
+      sshClient = client;
+      const display = client.getDisplay();
+
+      liveSshMount.innerHTML = '';
+      liveSshMount.appendChild(display.getElement());
+
+      const fitSsh = () => {
+        const dw = display.getWidth();
+        const dh = display.getHeight();
+        if (dw > 0 && dh > 0 && liveSshMount.clientWidth > 0 && liveSshMount.clientHeight > 0) {
+          const scale = Math.min(liveSshMount.clientWidth / dw, liveSshMount.clientHeight / dh, 1);
+          display.scale(scale);
+        }
+      };
+
+      client.onstatechange = (state) => {
+        if (destroyed || mode !== 'ssh') return;
+        const states = ['Idle', 'Connecting...', 'Waiting...', 'Connected', 'Disconnecting...', 'Disconnected'];
+        sshStatus = states[state] || 'Unknown';
+        if (state === 3) {
+          sshError = null;
+          setTimeout(fitSsh, 150);
+        }
+        renderBanner();
+        renderSshOverlay();
+      };
+
+      client.onerror = (err) => {
+        if (destroyed || mode !== 'ssh') return;
+        sshError = `Client error (code=${err?.code}): ${err?.message || 'SSH upstream error'}`;
+        sshStatus = 'Disconnected';
+        renderBanner();
+        renderSshOverlay();
+      };
+
+      const keyboard = new Guacamole.Keyboard(document);
+      sshKeyboard = keyboard;
+      keyboard.onkeydown = (keysym) => {
+        const tag = document.activeElement?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+        client.sendKeyEvent(1, keysym);
+        return false;
+      };
+      keyboard.onkeyup = (keysym) => {
+        const tag = document.activeElement?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        client.sendKeyEvent(0, keysym);
+      };
+
+      const onResize = () => fitSsh();
+      window.addEventListener('resize', onResize);
+      sshResizeCleanup = () => window.removeEventListener('resize', onResize);
+
+      client.connect(`token=${encodeURIComponent(data.token)}`);
+    } catch (err) {
+      if (destroyed || mode !== 'ssh') return;
+      sshError = err instanceof Error ? err.message : 'SSH connection failed';
+      sshStatus = 'Error';
+      renderBanner();
+      renderSshOverlay();
     }
   }
 
@@ -364,25 +575,51 @@ export function TerminalPage(params = {}) {
 
   function renderHeader() {
     headerContainer.innerHTML = '';
+    const vm = vms.find((v) => v.id === selectedVmId) || vms[0];
     headerContainer.appendChild(
       pageHeader({
         title: 'Web Terminal',
-        description: 'Native Linux interactive shell connected directly to your lab VM over an isolated SSH PTY gateway.',
-        actions: h('div', { class: 'flex items-center gap-2' },
+        description: mode === 'ssh'
+          ? 'Live Kali Linux SSH terminal connected via encrypted Guacamole gateway.'
+          : 'Simulated interactive shell (xterm.js) for offline practice.',
+        actions: h('div', { class: 'flex flex-wrap items-center gap-2' },
+          button({
+            variant: mode === 'ssh' ? 'primary' : 'secondary',
+            size: 'sm',
+            icon: 'terminal',
+            label: 'Live Kali SSH',
+            onClick: () => switchMode('ssh')
+          }),
+          button({
+            variant: mode === 'sim' ? 'primary' : 'secondary',
+            size: 'sm',
+            icon: 'cpu',
+            label: 'Simulated Shell',
+            onClick: () => switchMode('sim')
+          }),
+          button({
+            variant: 'secondary',
+            size: 'sm',
+            icon: 'monitor',
+            label: 'Open Desktop',
+            onClick: () => navigate(vm ? `/desktop?vm=${encodeURIComponent(vm.id)}` : '/desktop')
+          }),
           button({
             variant: 'outline',
             size: 'sm',
             icon: 'refresh-cw',
             label: 'Reconnect',
-            onClick: reconnectActiveTab
+            onClick: () => (mode === 'ssh' ? connectLiveSsh() : reconnectActiveTab())
           }),
-          button({
-            variant: 'outline',
-            size: 'sm',
-            icon: 'download',
-            label: 'Export Log',
-            onClick: downloadSessionLog
-          })
+          mode === 'sim'
+            ? button({
+                variant: 'outline',
+                size: 'sm',
+                icon: 'download',
+                label: 'Export Log',
+                onClick: downloadSessionLog
+              })
+            : null
         )
       })
     );
@@ -413,6 +650,11 @@ export function TerminalPage(params = {}) {
           class: 'bg-transparent text-fg text-xs font-medium outline-none cursor-pointer pr-1',
           onChange: (e) => {
             selectedVmId = e.target.value;
+            if (mode === 'ssh') {
+              renderHeader();
+              connectLiveSsh();
+              return;
+            }
             tabs.forEach(t => {
               try { t.term.dispose(); } catch {}
             });
@@ -712,6 +954,8 @@ export function TerminalPage(params = {}) {
   onCleanup(unsubTheme);
 
   onCleanup(() => {
+    destroyed = true;
+    disconnectLiveSsh();
     resizeObserver.disconnect();
     tabs.forEach(tab => {
       try { tab.term.dispose(); } catch {}
@@ -719,27 +963,46 @@ export function TerminalPage(params = {}) {
     tabs = [];
   });
 
+  const demoBanner = h('div', {
+    role: 'status',
+    'data-demo-banner': 'true',
+    class: 'flex items-center justify-between gap-2 px-3 py-1.5 text-xs font-mono border-b border-line bg-surface text-muted'
+  });
+
+  function renderBanner() {
+    demoBanner.innerHTML = '';
+    const vm = vms.find((v) => v.id === selectedVmId) || vms[0] || { name: 'kali-lab-01' };
+    if (mode === 'ssh') {
+      const toneClass = sshStatus === 'Connected' ? 'text-accent' : sshError ? 'text-danger' : 'text-muted';
+      demoBanner.append(
+        h('span', { class: 'flex items-center gap-2 font-medium text-fg' },
+          icon('terminal', 'w-3.5 h-3.5 text-accent'),
+          `${vm.name.toUpperCase()} // LIVE SSH (Port 22)`
+        ),
+        h('span', { class: `text-[11px] font-mono ${toneClass}` }, `Status: ${sshStatus}`)
+      );
+    } else {
+      demoBanner.append(
+        h('span', { class: 'flex items-center gap-2 font-medium text-fg' },
+          icon('shield-alert', 'w-3.5 h-3.5 text-accent'),
+          DEMO_BANNER_TEXT
+        ),
+        h('span', { class: 'text-[11px] text-muted' }, 'In-memory allow-listed shell · /home/student')
+      );
+    }
+  }
+
   // Assemble the component
+  renderBanner();
   renderHeader();
   renderControls();
   setupSearchBar();
   setupMobileKeys();
 
-  const demoBanner = h('div', {
-    role: 'status',
-    'data-demo-banner': 'true',
-    class: 'flex items-center justify-between gap-2 px-3 py-1.5 text-xs font-mono border-b border-line bg-surface text-muted'
-  },
-    h('span', { class: 'flex items-center gap-2 font-medium text-fg' },
-      icon('shield-alert', 'w-3.5 h-3.5 text-accent'),
-      DEMO_BANNER_TEXT
-    ),
-    h('span', { class: 'text-[11px] text-muted' }, 'In-memory allow-listed shell · /home/student')
-  );
-
   terminalCard.appendChild(demoBanner);
   terminalCard.appendChild(controlsRow);
   terminalCard.appendChild(searchBarEl);
+  terminalCard.appendChild(liveSshWrapper);
   terminalCard.appendChild(terminalStackEl);
   terminalCard.appendChild(mobileKeyBar);
 

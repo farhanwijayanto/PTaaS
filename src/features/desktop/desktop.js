@@ -1,35 +1,64 @@
+import Guacamole from 'guacamole-common-js';
 import { h, icon } from '../../lib/dom.js';
 import { api } from '../../lib/api.js';
-import { onCleanup } from '../../lib/router.js';
+import { navigate, onCleanup } from '../../lib/router.js';
 import { button } from '../../components/ui/button.js';
 import { badge } from '../../components/ui/badge.js';
 import { pageHeader } from '../../components/layout/page-header.js';
 import { PageContainer } from '../../components/layout/page-container.js';
-import { DEMO_DESKTOP_BANNER_TEXT } from '../../lib/demo-mode.js';
 
-export function DesktopPage(params = {}) {
+export function DesktopPage({ params, query } = {}) {
   let vms = [];
-  let selectedVmId = params?.id || null;
-  let resolution = '1920×1080';
+  let selectedVmId = query?.get('vm') || params?.id || null;
+  let status = 'Connecting...';
+  let lastError = null;
   let isFullscreen = false;
+  let activeClient = null;
+  let activeKeyboard = null;
+  let activeResizeCleanup = null;
+  let destroyed = false;
 
   const host = h('div', { class: 'space-y-4 font-sans select-none pb-8' });
   const headerContainer = h('div');
   const controlsContainer = h('div');
+  const statusBanner = h('div', {
+    role: 'status',
+    class: 'flex items-center justify-between gap-2 px-4 py-2 text-xs font-mono border-b border-line bg-surface text-muted shrink-0'
+  });
+  const displayMount = h('div', {
+    class: 'relative z-0 isolate flex-1 overflow-hidden flex items-center justify-center cursor-none',
+    style: 'background-color: var(--ink-950);'
+  });
   const viewportContainer = h('div', {
     class: 'relative flex flex-col overflow-hidden rounded-xl border border-line transition-all',
     'data-surface': 'dark',
-    style: 'height: calc(100dvh - 210px); min-height: 520px; background-color: var(--ink-950);'
-  });
+    style: 'height: calc(100dvh - 210px); min-height: 540px; background-color: var(--ink-950);'
+  }, statusBanner, displayMount);
 
   function getSelectedVm() {
-    return vms.find((v) => v.id === selectedVmId) || vms[0] || {
+    return vms.find((v) => v.id === selectedVmId || v.name === selectedVmId) || vms[0] || {
       id: 'vm-1',
       name: 'kali-lab-01',
-      os: 'Kali Linux 2024.3',
+      os: 'kali',
       ip: '10.10.1.5',
-      status: 'running',
+      status: 'running'
     };
+  }
+
+  function disconnectClient() {
+    if (activeResizeCleanup) {
+      activeResizeCleanup();
+      activeResizeCleanup = null;
+    }
+    if (activeKeyboard) {
+      activeKeyboard.onkeydown = null;
+      activeKeyboard.onkeyup = null;
+      activeKeyboard = null;
+    }
+    if (activeClient) {
+      try { activeClient.disconnect(); } catch { /* ignore */ }
+      activeClient = null;
+    }
   }
 
   function toggleFullscreen() {
@@ -46,17 +75,42 @@ export function DesktopPage(params = {}) {
     }
   }
 
+  function renderStatusBanner() {
+    statusBanner.innerHTML = '';
+    const vm = getSelectedVm();
+    const toneClass = status === 'Connected'
+      ? 'text-accent'
+      : lastError ? 'text-danger' : 'text-muted';
+
+    statusBanner.append(
+      h('span', { class: 'flex items-center gap-2 font-medium text-fg' },
+        icon('monitor', 'w-3.5 h-3.5 text-accent'),
+        `${vm.name.toUpperCase()} // LIVE RDP`
+      ),
+      h('span', { class: `text-xs font-mono ${toneClass}` },
+        lastError && !status.includes(lastError) ? `Status: ${status} | ${lastError}` : `Status: ${status}`
+      )
+    );
+  }
+
   function renderHeader() {
     headerContainer.innerHTML = '';
     const vm = getSelectedVm();
+    const statusTone = status === 'Connected' ? 'accent' : lastError ? 'danger' : 'neutral';
     headerContainer.appendChild(
       pageHeader({
         title: 'Remote Desktop',
-        subtitle: `Static desktop preview for ${vm.name} (${vm.os || 'Kali Linux'})`,
-        breadcrumbs: [{ label: 'Compute' }, { label: 'Desktop' }],
-        actions: [
-          badge({ tone: 'neutral', text: 'Demo Simulation' }),
-        ],
+        description: `Live Kali Linux RDP session for ${vm.name} (${vm.ip || '10.10.1.5'})`,
+        actions: h('div', { class: 'flex items-center gap-2' },
+          badge({ tone: statusTone, label: status, dot: true }),
+          button({
+            variant: 'secondary',
+            size: 'sm',
+            icon: 'terminal',
+            label: 'Terminal',
+            onClick: () => navigate(`/terminal?vm=${encodeURIComponent(vm.id)}`)
+          })
+        )
       })
     );
   }
@@ -76,7 +130,7 @@ export function DesktopPage(params = {}) {
                 selectedVmId = e.target.value;
                 renderHeader();
                 renderControls();
-                renderViewport();
+                connectGuacamole();
               }
             },
               vms.map((v) => h('option', {
@@ -86,9 +140,23 @@ export function DesktopPage(params = {}) {
               }, `${v.name} (${v.ip || '10.10.1.5'})`))
             )
           ),
-          h('span', { class: 'text-xs font-mono text-muted' }, `RDP · ${resolution}`)
+          h('span', { class: 'text-xs font-mono text-muted' }, 'Guacamole RDP · Live')
         ),
         h('div', { class: 'flex items-center gap-2' },
+          button({
+            variant: 'secondary',
+            size: 'xs',
+            icon: 'rotate-cw',
+            label: 'Reconnect',
+            onClick: () => connectGuacamole()
+          }),
+          button({
+            variant: 'ghost',
+            size: 'xs',
+            icon: 'external-link',
+            label: 'Full Page (/lab)',
+            onClick: () => { window.location.href = `/lab?vm=${encodeURIComponent(vm.id)}`; }
+          }),
           button({
             variant: 'ghost',
             size: 'xs',
@@ -101,86 +169,158 @@ export function DesktopPage(params = {}) {
     );
   }
 
-  function renderViewport() {
-    viewportContainer.innerHTML = '';
+  async function connectGuacamole() {
+    disconnectClient();
+    if (destroyed) return;
+
     const vm = getSelectedVm();
+    status = 'Connecting...';
+    lastError = null;
+    renderHeader();
+    renderStatusBanner();
 
-    // Non-dismissible demo banner
-    const banner = h('div', {
-      role: 'status',
-      'data-demo-banner': 'true',
-      class: 'flex items-center justify-between gap-2 px-4 py-2 text-xs font-mono border-b border-line bg-surface text-muted shrink-0'
-    },
-      h('span', { class: 'flex items-center gap-2 font-medium text-fg' },
-        icon('shield-alert', 'w-3.5 h-3.5 text-accent'),
-        DEMO_DESKTOP_BANNER_TEXT
-      ),
-      h('span', { class: 'text-[11px] text-muted hidden sm:inline' }, 'Live RDP/VNC requires local gateway/')
-    );
+    const wsBase = process.env.NEXT_PUBLIC_GUAC_WS_URL;
+    if (!wsBase) {
+      status = 'Not configured';
+      lastError = 'NEXT_PUBLIC_GUAC_WS_URL is not configured';
+      renderHeader();
+      renderStatusBanner();
+      return;
+    }
 
-    // Static Kali/Linux desktop simulation canvas (token-based dark surface)
-    const desktopMock = h('div', {
-      class: 'relative flex-1 flex flex-col justify-between p-6 overflow-hidden bg-canvas text-fg'
-    },
-      // Top XFCE panel simulation
-      h('div', { class: 'flex items-center justify-between rounded-lg border border-line bg-surface px-3 py-1.5 text-[11px] font-mono text-muted' },
-        h('div', { class: 'flex items-center gap-3' },
-          h('span', { class: 'font-semibold text-accent-text' }, 'Applications'),
-          h('span', { class: 'text-subtle' }, '|'),
-          h('span', { class: 'text-fg' }, `${vm.name} (${vm.ip || '10.10.1.5'})`)
-        ),
-        h('div', { class: 'flex items-center gap-3 text-muted' },
-          h('span', {}, 'eth0: UP'),
-          h('span', {}, 'vxlan-4096'),
-          h('span', {}, '21:27 UTC')
-        )
-      ),
+    try {
+      const rect = displayMount.getBoundingClientRect();
+      const width = Math.max(800, Math.min(1920, Math.round(rect.width || 1280)));
+      const height = Math.max(600, Math.min(1080, Math.round(rect.height || 720)));
 
-      // Center window preview
-      h('div', { class: 'mx-auto my-auto w-full max-w-2xl rounded-xl border border-line-strong bg-surface shadow-2xl overflow-hidden' },
-        h('div', { class: 'flex items-center justify-between px-3.5 py-2 border-b border-line bg-raised' },
-          h('div', { class: 'flex items-center gap-2' },
-            h('span', { class: 'w-2.5 h-2.5 rounded-full', style: 'background: var(--danger);' }),
-            h('span', { class: 'w-2.5 h-2.5 rounded-full', style: 'background: var(--warning);' }),
-            h('span', { class: 'w-2.5 h-2.5 rounded-full', style: 'background: var(--success);' }),
-            h('span', { class: 'ml-2 text-xs font-mono text-muted' }, `student@${vm.name}: ~ (Static Preview)`)
-          ),
-          badge({ tone: 'accent', text: 'DEMO PREVIEW' })
-        ),
-        h('div', { class: 'p-5 font-mono text-xs leading-relaxed text-fg space-y-2' },
-          h('div', { class: 'text-accent-text' }, '$ uname -a'),
-          h('div', { class: 'text-muted' }, `Linux ${vm.name} 6.6.9-cloud-amd64 #1 SMP PREEMPT_DYNAMIC x86_64 GNU/Linux`),
-          h('div', { class: 'text-accent-text pt-1' }, '$ ip -br a'),
-          h('div', { class: 'text-muted' }, `eth0  UP  ${vm.ip || '10.10.1.5'}/24   |   vxlan-4096  UP  10.10.2.1/24`),
-          h('div', { class: 'mt-4 pt-3 border-t border-line text-[11px] text-muted' },
-            'Interactive Guacamole RDP/VNC streaming is disabled in the public Vercel demo. Use the Web Terminal for simulated CLI commands, or run the separate gateway/ locally for real containers.'
-          )
-        )
-      ),
+      const queryStr = new URLSearchParams({
+        vm: vm.id,
+        protocol: 'rdp',
+        width: String(width),
+        height: String(height)
+      }).toString();
 
-      // Bottom dock simulation
-      h('div', { class: 'mx-auto flex items-center gap-2 rounded-xl border border-line bg-surface px-3 py-1.5 text-[11px] font-mono text-muted' },
-        h('span', { class: 'px-2 py-0.5 rounded bg-raised text-fg font-medium' }, 'Terminal'),
-        h('span', { class: 'px-2 py-0.5 rounded' }, 'Burp Suite'),
-        h('span', { class: 'px-2 py-0.5 rounded' }, 'Wireshark'),
-        h('span', { class: 'px-2 py-0.5 rounded' }, 'Nmap')
-      )
-    );
+      const res = await fetch(`/api/guac-token?${queryStr}`, { credentials: 'same-origin' });
+      if (res.status === 401) {
+        navigate('/login', { replace: true });
+        return;
+      }
+      const data = await res.json();
+      if (!res.ok || !data?.token) {
+        throw new Error(data?.error || 'Failed to obtain Guacamole session token');
+      }
+      if (destroyed) return;
 
-    viewportContainer.appendChild(banner);
-    viewportContainer.appendChild(desktopMock);
+      const baseWsUrl = `${wsBase.replace(/\/+$/, '')}/`;
+      const tunnel = new Guacamole.WebSocketTunnel(baseWsUrl);
+
+      tunnel.onerror = (err) => {
+        if (destroyed) return;
+        lastError = `Tunnel Error (code=${err?.code}): ${err?.message || 'connection failed'}`;
+        status = 'Error';
+        renderHeader();
+        renderStatusBanner();
+      };
+
+      tunnel.onstatechange = (state) => {
+        if (destroyed) return;
+        if (state === 2 && !lastError) {
+          status = 'Disconnected';
+          renderHeader();
+          renderStatusBanner();
+        }
+      };
+
+      const client = new Guacamole.Client(tunnel);
+      activeClient = client;
+      const display = client.getDisplay();
+
+      displayMount.innerHTML = '';
+      displayMount.appendChild(display.getElement());
+
+      const fitDisplay = () => {
+        const dw = display.getWidth();
+        const dh = display.getHeight();
+        if (dw > 0 && dh > 0 && displayMount.clientWidth > 0 && displayMount.clientHeight > 0) {
+          const scale = Math.min(displayMount.clientWidth / dw, displayMount.clientHeight / dh, 1);
+          display.scale(scale);
+        }
+      };
+
+      client.onstatechange = (state) => {
+        if (destroyed) return;
+        const states = ['Idle', 'Connecting...', 'Waiting...', 'Connected', 'Disconnecting...', 'Disconnected'];
+        status = states[state] || 'Unknown';
+        if (state === 3) {
+          lastError = null;
+          setTimeout(fitDisplay, 150);
+        }
+        renderHeader();
+        renderStatusBanner();
+      };
+
+      client.onerror = (err) => {
+        if (destroyed) return;
+        lastError = `Client Error (code=${err?.code}): ${err?.message || 'upstream error'}`;
+        status = 'Error';
+        renderHeader();
+        renderStatusBanner();
+      };
+
+      const mouse = new Guacamole.Mouse(display.getElement());
+      mouse.onmousedown = mouse.onmouseup = mouse.onmousemove = (mouseState) => {
+        const scale = display.getScale() || 1;
+        const scaled = new Guacamole.Mouse.State(
+          mouseState.x / scale,
+          mouseState.y / scale,
+          mouseState.left,
+          mouseState.middle,
+          mouseState.right,
+          mouseState.up,
+          mouseState.down
+        );
+        client.sendMouseState(scaled);
+      };
+
+      const keyboard = new Guacamole.Keyboard(document);
+      activeKeyboard = keyboard;
+      keyboard.onkeydown = (keysym) => {
+        const tag = document.activeElement?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+        client.sendKeyEvent(1, keysym);
+        return false;
+      };
+      keyboard.onkeyup = (keysym) => {
+        const tag = document.activeElement?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        client.sendKeyEvent(0, keysym);
+      };
+
+      const onResize = () => fitDisplay();
+      window.addEventListener('resize', onResize);
+      activeResizeCleanup = () => window.removeEventListener('resize', onResize);
+
+      client.connect(`token=${encodeURIComponent(data.token)}`);
+    } catch (err) {
+      if (destroyed) return;
+      lastError = err instanceof Error ? err.message : 'Failed to connect';
+      status = 'Error';
+      renderHeader();
+      renderStatusBanner();
+    }
   }
 
   async function init() {
     const list = await api.vms.list().catch(() => []);
-    vms = list.length ? list : [
-      { id: 'vm-1', name: 'kali-lab-01', os: 'Kali Linux 2024.3', ip: '10.10.1.5', status: 'running' },
-      { id: 'vm-2', name: 'parrot-sec-01', os: 'Parrot Security 6.1', ip: '10.10.1.8', status: 'running' },
-    ];
+    const runningVms = list.filter((v) => v.status === 'running');
+    vms = runningVms.length ? runningVms : (list.length ? list : [
+      { id: 'vm-1', name: 'kali-lab-01', os: 'kali', ip: '10.10.1.5', status: 'running' }
+    ]);
     if (!selectedVmId && vms.length > 0) selectedVmId = vms[0].id;
     renderHeader();
     renderControls();
-    renderViewport();
+    renderStatusBanner();
+    connectGuacamole();
   }
 
   const onFsChange = () => {
@@ -188,7 +328,11 @@ export function DesktopPage(params = {}) {
     renderControls();
   };
   document.addEventListener('fullscreenchange', onFsChange);
-  onCleanup(() => document.removeEventListener('fullscreenchange', onFsChange));
+  onCleanup(() => {
+    destroyed = true;
+    document.removeEventListener('fullscreenchange', onFsChange);
+    disconnectClient();
+  });
 
   host.appendChild(headerContainer);
   host.appendChild(controlsContainer);

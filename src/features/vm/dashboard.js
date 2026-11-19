@@ -100,9 +100,57 @@ function sidePanel({ vms, activity, user }) {
         : h('p', { class: 'py-4 text-sm text-muted' }, t('dash.noActivity'))));
 }
 
+function roleQuickBar(user, vms) {
+  const firstRunning = vms.find((v) => v.status === 'running');
+  const vmParam = firstRunning ? `?vm=${encodeURIComponent(firstRunning.id)}` : '';
+
+  if (user.role === 'admin') {
+    return h('section', { class: 'mb-8 rounded-xl border border-line bg-surface p-4 flex flex-wrap items-center justify-between gap-4' },
+      h('div', { class: 'space-y-0.5' },
+        h('div', { class: 'text-sm font-semibold text-fg' }, 'Administrator Control Center'),
+        h('p', { class: 'text-xs text-muted' }, 'Kelola akun & password user, setujui permohonan VM, atau akses langsung lab Kali Linux.')
+      ),
+      h('div', { class: 'flex flex-wrap items-center gap-2' },
+        button({ label: 'Manage Users & Passwords', icon: 'users', variant: 'primary', size: 'sm', href: '/admin/users' }),
+        button({ label: 'Approvals', icon: 'clipboard-check', variant: 'secondary', size: 'sm', href: '/approvals' }),
+        button({ label: 'Kali Desktop', icon: 'monitor', variant: 'secondary', size: 'sm', href: `/desktop${vmParam}` }),
+        button({ label: 'Terminal', icon: 'terminal', variant: 'ghost', size: 'sm', href: `/terminal${vmParam}` })
+      )
+    );
+  }
+
+  if (user.role === 'instructor') {
+    return h('section', { class: 'mb-8 rounded-xl border border-line bg-surface p-4 flex flex-wrap items-center justify-between gap-4' },
+      h('div', { class: 'space-y-0.5' },
+        h('div', { class: 'text-sm font-semibold text-fg' }, 'Instructor Workspace'),
+        h('p', { class: 'text-xs text-muted' }, 'Pantau mahasiswa cohort, proses persetujuan VM, dan akses lab Kali Linux.')
+      ),
+      h('div', { class: 'flex flex-wrap items-center gap-2' },
+        button({ label: 'Students', icon: 'users', variant: 'primary', size: 'sm', href: '/admin/users' }),
+        button({ label: 'Approvals', icon: 'clipboard-check', variant: 'secondary', size: 'sm', href: '/approvals' }),
+        button({ label: 'Kali Desktop', icon: 'monitor', variant: 'secondary', size: 'sm', href: `/desktop${vmParam}` }),
+        button({ label: 'Terminal', icon: 'terminal', variant: 'ghost', size: 'sm', href: `/terminal${vmParam}` })
+      )
+    );
+  }
+
+  return h('section', { class: 'mb-8 rounded-xl border border-line bg-surface p-4 flex flex-wrap items-center justify-between gap-4' },
+    h('div', { class: 'space-y-0.5' },
+      h('div', { class: 'text-sm font-semibold text-fg' }, 'Kali Linux Lab Workspace'),
+      h('p', { class: 'text-xs text-muted' }, firstRunning ? `Lab aktif: ${firstRunning.name} (${firstRunning.ip}) — siap diakses lewat Remote Desktop & Terminal.` : 'Buat VM Kali Linux baru untuk memulai sesi pentesting.')
+    ),
+    h('div', { class: 'flex flex-wrap items-center gap-2' },
+      button({ label: 'Open Kali Desktop', icon: 'monitor', variant: 'primary', size: 'sm', href: `/desktop${vmParam}`, disabled: !firstRunning }),
+      button({ label: 'Open Terminal', icon: 'terminal', variant: 'secondary', size: 'sm', href: `/terminal${vmParam}`, disabled: !firstRunning }),
+      button({ label: 'New Kali VM', icon: 'plus', variant: 'ghost', size: 'sm', href: '/vms/new' })
+    )
+  );
+}
+
 function content({ vms, metrics, activity, user }) {
   const running = vms.filter((vm) => vm.status === 'running').length;
   return h('div', {},
+    roleQuickBar(user, vms),
     h('section', { class: 'grid grid-cols-1 divide-y divide-line border-y border-line sm:grid-cols-3 sm:divide-x sm:divide-y-0' },
       kpi({ label: t('kpi.boot'), value: metrics.boot.value.toFixed(1), unit: 's', hint: t('kpi.boot.hint'), series: metrics.boot.series }),
       kpi({ label: t('kpi.connect'), value: metrics.connect.value.toFixed(1), unit: 's', hint: t('kpi.connect.hint'), series: metrics.connect.series }),

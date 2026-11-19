@@ -3,6 +3,7 @@ import { t } from '../../lib/i18n.js';
 import { useAuth } from '../../lib/auth.js';
 import { visibleNav, findActive } from '../../app/nav.js';
 import { initials } from '../../lib/format.js';
+import { vmDb } from '../../mock/vms.js';
 
 export function toggleSidebar() {
   const root = document.documentElement;
@@ -35,15 +36,18 @@ if (typeof window !== 'undefined') {
   });
 }
 
-function navLink(item, active, role) {
+function navLink(item, active, role, user) {
   const isActive = active?.path === item.path;
 
-  // Small badge pills (e.g. 2 running VMs, 1 pending approval)
+  // Small badge pills (dynamic VM count, pending approvals)
   let badgeEl = null;
   if (item.path === '/vms') {
+    const visibleCount = role === 'student'
+      ? vmDb.filter((v) => v.owner === user?.id).length
+      : vmDb.length;
     badgeEl = h('span', {
       class: 'sb-badge ml-auto rounded-full bg-[var(--accent-bg)] px-1.5 py-0.2 text-[11px] font-mono font-medium text-[var(--accent-text)]'
-    }, '2');
+    }, String(visibleCount));
   } else if (item.path === '/approvals' && (role === 'admin' || role === 'instructor')) {
     badgeEl = h('span', {
       class: 'sb-badge ml-auto rounded-full bg-[var(--warning-bg)] px-1.5 py-0.2 text-[11px] font-mono font-medium text-[var(--warning-text)]'
@@ -78,12 +82,14 @@ function quotaMiniMeter(user) {
   if (user.role !== 'student') return null;
 
   const quota = user.quota || { vcpu: 8, ram: 16 };
-  const usedVcpu = 4;
-  const usedRam = 8;
+  const ownedVms = vmDb.filter((v) => v.owner === user.id);
+  const activeVms = ownedVms.filter((v) => v.status !== 'stopped');
+  const usedVcpu = activeVms.reduce((s, v) => s + (v.vcpu || 0), 0);
+  const usedRam = activeVms.reduce((s, v) => s + (v.ram || 0), 0);
   const vmLimit = user.maxSelfServiceVms || 3;
-  const usedVms = user.id === 'u-jsmith' || user.id === 'u-edavis' || user.id === 'u-mwilson' ? 3 : 2;
-  const vcpuPct = Math.round((usedVcpu / quota.vcpu) * 100);
-  const ramPct = Math.round((usedRam / quota.ram) * 100);
+  const usedVms = ownedVms.length;
+  const vcpuPct = Math.min(100, Math.round((usedVcpu / quota.vcpu) * 100));
+  const ramPct = Math.min(100, Math.round((usedRam / quota.ram) * 100));
 
   return h('div', { class: 'sb-quota rounded-lg border border-line bg-surface/60 p-2.5 space-y-2 mb-2 text-xs' },
     h('div', { class: 'flex items-center justify-between text-[11px] text-muted' },
@@ -160,7 +166,7 @@ export function Sidebar({ path }) {
   },
     groups.map((g) => h('div', { class: 'sb-group mt-6 first:mt-2' },
       g.group && h('div', { class: 'sb-group-label mb-2' }, t(g.group)),
-      h('div', { class: 'space-y-1' }, g.items.map((item) => navLink(item, active, role)))
+      h('div', { class: 'space-y-1' }, g.items.map((item) => navLink(item, active, role, user)))
     ))
   );
 

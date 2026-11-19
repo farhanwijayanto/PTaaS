@@ -26,6 +26,7 @@ const ALLOWED_EMAIL_DOMAINS = ['example.com', 'example.org', 'example.edu'];
 const IGNORE_DIRS = new Set([
   'node_modules',
   '.git',
+  '.next',
   '.system_generated',
   'browser_evidence',
   'scratch',

@@ -126,7 +126,14 @@ export function UsersPage() {
             type: 'button', 'aria-label': `${t('vm.act.more')}: ${u.name}`,
             class: 'flex h-8 w-8 items-center justify-center rounded-lg text-muted transition-colors hover:bg-raised hover:text-fg'
           }, icon('ellipsis', 'w-4 h-4'));
-          return dropdown({ trigger: more, items: () => getUserMenuItems(u) });
+          return h('div', { class: 'flex justify-end items-center gap-1' },
+            button({
+              icon: 'key-round', variant: 'ghost', size: 'icon',
+              ariaLabel: `Set password: ${u.name}`,
+              title: 'Set / Change Password',
+              onClick: () => openSetPasswordModal(u)
+            }),
+            dropdown({ trigger: more, items: () => getUserMenuItems(u) }));
         }
       }
     ];
@@ -136,15 +143,205 @@ export function UsersPage() {
     const isSuspended = u.status === 'suspended';
     return [
       { label: t('users.act.detail'), icon: 'user', onSelect: () => openUserDetailDrawer(u) },
+      { label: 'Edit User', icon: 'pencil', onSelect: () => openEditUserModal(u) },
+      { label: 'Set / Change Password', icon: 'key-round', onSelect: () => openSetPasswordModal(u) },
       { type: 'separator' },
       isSuspended
         ? { label: t('users.act.activate'), icon: 'check-circle', onSelect: () => handleUserAction(u, 'activate') }
         : { label: t('users.act.suspend'), icon: 'ban', danger: true, onSelect: () => handleUserAction(u, 'suspend') },
-      { label: t('users.act.resetPass'), icon: 'key-round', onSelect: () => handleUserAction(u, 'resetPass') },
-      { label: t('users.act.resetMfa'), icon: 'shield-alert', onSelect: () => handleUserAction(u, 'resetMfa') },
+      { label: 'Generate Random Password', icon: 'refresh-cw', onSelect: () => handleUserAction(u, 'resetPass') },
       { type: 'separator' },
       { label: t('users.act.delete'), icon: 'trash-2', danger: true, onSelect: () => handleDeleteUser(u) }
     ];
+  }
+
+  function openSetPasswordModal(u) {
+    let newPassword = '';
+    let confirmPassword = '';
+    let showPlain = false;
+    let requireChange = false;
+    let errorText = null;
+    let dialog;
+
+    const errBox = h('div', { class: 'hidden rounded-lg border border-danger/30 bg-danger/10 p-2.5 text-xs text-danger', role: 'alert' });
+    const passInput = input({
+      id: `set-pass-${u.id}`,
+      type: 'password',
+      placeholder: 'Minimal 6 karakter',
+      autocomplete: 'new-password',
+      onInput: (v) => { newPassword = v; }
+    });
+    const confirmInput = input({
+      id: `confirm-pass-${u.id}`,
+      type: 'password',
+      placeholder: 'Ulangi password baru',
+      autocomplete: 'new-password',
+      onInput: (v) => { confirmPassword = v; }
+    });
+
+    const showToggle = h('input', {
+      type: 'checkbox',
+      id: `show-pass-${u.id}`,
+      class: 'rounded border-line',
+      onChange: (e) => {
+        showPlain = e.target.checked;
+        passInput.type = showPlain ? 'text' : 'password';
+        confirmInput.type = showPlain ? 'text' : 'password';
+      }
+    });
+
+    const mustChangeToggle = h('input', {
+      type: 'checkbox',
+      id: `must-change-${u.id}`,
+      class: 'rounded border-line',
+      onChange: (e) => { requireChange = e.target.checked; }
+    });
+
+    const savePassword = async () => {
+      if (newPassword.length < 6) {
+        errorText = 'Password minimal 6 karakter.';
+        errBox.textContent = errorText;
+        errBox.classList.remove('hidden');
+        return;
+      }
+      if (newPassword !== confirmPassword) {
+        errorText = 'Konfirmasi password tidak cocok.';
+        errBox.textContent = errorText;
+        errBox.classList.remove('hidden');
+        return;
+      }
+      try {
+        await api.users.setPassword(u.id, newPassword, requireChange);
+        dialog.close();
+        toast({ title: 'Password diperbarui', description: `Password untuk ${u.email} berhasil diubah.`, kind: 'success' });
+        load({ silent: true });
+      } catch (err) {
+        errBox.textContent = err.message || 'Gagal mengubah password.';
+        errBox.classList.remove('hidden');
+      }
+    };
+
+    dialog = openDialog({
+      title: `Set Password — ${u.name}`,
+      description: `Atur password login baru untuk ${u.email}.`,
+      body: h('div', { class: 'space-y-4' },
+        errBox,
+        field({ label: 'New Password', id: `set-pass-${u.id}`, control: passInput }),
+        field({ label: 'Confirm Password', id: `confirm-pass-${u.id}`, control: confirmInput }),
+        h('div', { class: 'space-y-2 pt-1 text-xs text-muted' },
+          h('label', { for: `show-pass-${u.id}`, class: 'flex items-center gap-2 cursor-pointer' }, showToggle, 'Tampilkan password'),
+          h('label', { for: `must-change-${u.id}`, class: 'flex items-center gap-2 cursor-pointer' }, mustChangeToggle, 'Wajibkan user ganti password saat login berikutnya')
+        )
+      ),
+      actions: [
+        button({ label: t('common.cancel'), variant: 'secondary', onClick: () => dialog.close() }),
+        button({ label: 'Save Password', variant: 'primary', onClick: savePassword })
+      ]
+    });
+  }
+
+  function openEditUserModal(u) {
+    const draft = {
+      name: u.name || '',
+      email: u.email || '',
+      role: u.role || 'student',
+      cohort: u.cohort || cohorts[0]?.id || 'CS-401',
+      status: u.status || 'active',
+      password: ''
+    };
+    let dialog;
+    const errBox = h('div', { class: 'hidden rounded-lg border border-danger/30 bg-danger/10 p-2.5 text-xs text-danger', role: 'alert' });
+
+    const nameInp = input({ id: `edit-name-${u.id}`, value: draft.name, onInput: (v) => { draft.name = v; } });
+    const emailInp = input({ id: `edit-email-${u.id}`, type: 'email', value: draft.email, onInput: (v) => { draft.email = v; } });
+    const roleSel = select({
+      ariaLabel: 'Role',
+      value: draft.role,
+      onChange: (v) => { draft.role = v; },
+      options: isInstructor
+        ? [{ value: 'student', label: t('role.student') }]
+        : [
+            { value: 'student', label: t('role.student') },
+            { value: 'instructor', label: t('role.instructor') },
+            { value: 'admin', label: t('role.admin') }
+          ]
+    });
+    const cohortSel = select({
+      ariaLabel: 'Cohort',
+      value: draft.cohort,
+      onChange: (v) => { draft.cohort = v; },
+      options: cohorts.map((c) => ({ value: c.id, label: `${c.id} - ${c.name}` }))
+    });
+    const statusSel = select({
+      ariaLabel: 'Status',
+      value: draft.status,
+      onChange: (v) => { draft.status = v; },
+      options: [
+        { value: 'active', label: 'Active' },
+        { value: 'pending', label: 'Pending' },
+        { value: 'suspended', label: 'Suspended' }
+      ]
+    });
+    const passInp = input({
+      id: `edit-pass-${u.id}`,
+      type: 'password',
+      placeholder: 'Kosongkan jika tidak ingin mengubah password',
+      autocomplete: 'new-password',
+      onInput: (v) => { draft.password = v; }
+    });
+
+    const saveChanges = async () => {
+      if (!draft.name.trim() || !draft.email.trim()) {
+        errBox.textContent = 'Nama dan email wajib diisi.';
+        errBox.classList.remove('hidden');
+        return;
+      }
+      if (draft.password && draft.password.length < 6) {
+        errBox.textContent = 'Password baru minimal 6 karakter.';
+        errBox.classList.remove('hidden');
+        return;
+      }
+      try {
+        const updates = {
+          name: draft.name.trim(),
+          email: draft.email.trim(),
+          role: draft.role,
+          cohort: draft.cohort,
+          status: draft.status
+        };
+        if (draft.password) {
+          updates.password = draft.password;
+          updates.mustChangePassword = false;
+        }
+        await api.users.update(u.id, updates);
+        dialog.close();
+        toast({ title: 'User diperbarui', description: `Perubahan untuk ${draft.email} disimpan.`, kind: 'success' });
+        load({ silent: true });
+      } catch (err) {
+        errBox.textContent = err.message || 'Gagal menyimpan perubahan.';
+        errBox.classList.remove('hidden');
+      }
+    };
+
+    dialog = openDialog({
+      title: `Edit User — ${u.name}`,
+      description: 'Ubah data akun, role, status, atau atur password baru.',
+      body: h('div', { class: 'space-y-3' },
+        errBox,
+        field({ label: 'Full Name', id: `edit-name-${u.id}`, control: nameInp }),
+        field({ label: 'Email', id: `edit-email-${u.id}`, control: emailInp }),
+        h('div', { class: 'grid grid-cols-1 sm:grid-cols-2 gap-3' },
+          field({ label: 'Role', id: `edit-role-${u.id}`, control: roleSel }),
+          field({ label: 'Status', id: `edit-status-${u.id}`, control: statusSel })
+        ),
+        field({ label: 'Cohort', id: `edit-cohort-${u.id}`, control: cohortSel }),
+        field({ label: 'New Password', id: `edit-pass-${u.id}`, optional: 'optional', control: passInp })
+      ),
+      actions: [
+        button({ label: t('common.cancel'), variant: 'secondary', onClick: () => dialog.close() }),
+        button({ label: 'Save Changes', variant: 'primary', onClick: saveChanges })
+      ]
+    });
   }
 
   async function handleUserAction(u, action) {
@@ -229,6 +426,8 @@ export function UsersPage() {
       name: '',
       email: '',
       idNum: '',
+      password: '',
+      mustChangePassword: false,
       role: isInstructor ? 'student' : 'student',
       cohort: cohorts[0]?.id || '',
       quota: { vcpu: 8, ram: 16, storage: 150, vms: 4 },
@@ -242,6 +441,21 @@ export function UsersPage() {
       const nameInp = input({ id: 'u-name', placeholder: 'Lucas Scott', value: formData.name, onInput: (v) => { formData.name = v; } });
       const emailInp = input({ id: 'u-email', type: 'email', placeholder: 'lucas.scott@example.edu', value: formData.email, onInput: (v) => { formData.email = v; } });
       const idInp = input({ id: 'u-nim', placeholder: 'STU-0016', value: formData.idNum, onInput: (v) => { formData.idNum = v; } });
+      const passInp = input({
+        id: 'u-password',
+        type: 'password',
+        placeholder: 'Kosongkan untuk generate otomatis',
+        value: formData.password,
+        autocomplete: 'new-password',
+        onInput: (v) => { formData.password = v; }
+      });
+      const forceChangeChk = h('input', {
+        id: 'u-force-change',
+        type: 'checkbox',
+        checked: formData.mustChangePassword,
+        class: 'rounded border-line',
+        onChange: (e) => { formData.mustChangePassword = e.target.checked; }
+      });
 
       const roleSelect = select({
         ariaLabel: t('users.create.role'), value: formData.role,
@@ -265,6 +479,11 @@ export function UsersPage() {
         h('div', { class: 'text-xs text-subtle font-mono' }, t('users.create.step1')),
         field({ label: t('users.create.name'), id: 'u-name', control: nameInp }),
         field({ label: t('users.create.email'), id: 'u-email', control: emailInp }),
+        field({ label: 'Initial Password', id: 'u-password', optional: 'optional', hint: 'Minimal 6 karakter, atau kosongkan untuk auto-generate.', control: passInp }),
+        h('label', { for: 'u-force-change', class: 'flex items-center gap-2 text-xs text-muted cursor-pointer' },
+          forceChangeChk,
+          'Wajibkan ganti password pada login pertama'
+        ),
         field({ label: t('users.create.idNum'), id: 'u-nim', control: idInp }),
         field({ label: t('users.create.role'), id: 'u-role', control: roleSelect }),
         field({ label: t('users.create.cohort'), id: 'u-cohort', control: cohortSelect }));
@@ -459,8 +678,9 @@ Alan Turing,alan.turing@example.edu,STU-0018,SEC-301`;
         h('div', { class: 'pt-4 border-t border-line space-y-2' },
           h('h4', { class: 'text-xs font-semibold text-subtle uppercase mb-2' }, 'Administrative Actions'),
           h('div', { class: 'grid grid-cols-2 gap-2' },
-            button({ label: t('users.act.resetPass'), variant: 'secondary', size: 'sm', onClick: () => handleUserAction(u, 'resetPass') }),
-            button({ label: t('users.act.resetMfa'), variant: 'secondary', size: 'sm', onClick: () => handleUserAction(u, 'resetMfa') }),
+            button({ label: 'Set Password', icon: 'key-round', variant: 'primary', size: 'sm', onClick: () => openSetPasswordModal(u) }),
+            button({ label: 'Edit User', icon: 'pencil', variant: 'secondary', size: 'sm', onClick: () => openEditUserModal(u) }),
+            button({ label: 'Random Reset', variant: 'secondary', size: 'sm', onClick: () => handleUserAction(u, 'resetPass') }),
             button({
               label: isSuspended ? t('users.act.activate') : t('users.act.suspend'),
               variant: isSuspended ? 'secondary' : 'danger-ghost', size: 'sm',

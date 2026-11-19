@@ -1,10 +1,10 @@
 // API layer. Pages only call these functions, never the mock db directly.
 // Each call has simulated latency so loading states are real. Swap the bodies for fetch() later.
-import { vmDb, vmRequestDb, policyDb, userVmLimitDb } from '../mock/vms.js';
+import { vmDb, vmRequestDb, policyDb, userVmLimitDb, persistVms, mergeServerVms } from '../mock/vms.js';
 import { auditDb, logEvent } from '../mock/audit.js';
 import { metricsDb } from '../mock/metrics.js';
-import { users, userById, cohorts } from '../mock/users.js';
-import { useAuth } from './auth.js';
+import { users, userById, cohorts, persistUsers, upsertUser, replaceUsersFromServer } from '../mock/users.js';
+import { useAuth, sha256Hex } from './auth.js';
 import { emit } from './events.js';
 
 const wait = (ms = 300) => new Promise((resolve) => setTimeout(resolve, ms + Math.random() * 200));
@@ -44,7 +44,16 @@ function findManageable(id) {
 
 export const api = {
   vms: {
-    list: () => call(() => visibleVms()),
+    list: async () => {
+      try {
+        const res = await fetch('/api/vms', { credentials: 'same-origin' });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data?.vms)) mergeServerVms(data.vms);
+        }
+      } catch { /* fallback to local store */ }
+      return call(() => visibleVms());
+    },
     action: (id, action) =>
       call(() => {
         const vm = findManageable(id);
@@ -64,6 +73,7 @@ export const api = {
             setTimeout(() => {
               vm.status = 'running';
               vm.idleSeconds = 3600;
+              persistVms();
               emit('vms:changed');
             }, 1800);
             break;
@@ -77,69 +87,104 @@ export const api = {
           default:
             throw new Error(`Unknown action: ${action}`);
         }
+        persistVms();
         emit('vms:changed');
         return true;
       }),
-    create: (data) =>
-      call(() => {
-        const { user } = useAuth();
-        if (!user) throw forbidden();
-        const studentId = user.id;
+    create: async (data) => {
+      const { user } = useAuth();
+      if (!user) throw forbidden();
 
-        // Count non-deleted VMs for this student
-        const activeStatuses = ['creating', 'running', 'stopped', 'error', 'restarting'];
-        const activeCount = vmDb.filter((v) => v.owner === studentId && activeStatuses.includes(v.status)).length;
-        const limit = userVmLimitDb.get(studentId) || policyDb.maxSelfServiceVms;
+      const requestedOs = (data.os || 'kali').toLowerCase();
+      if (requestedOs !== 'kali') {
+        throw new Error('Saat ini hanya image Kali Linux yang tersedia untuk pembuatan VM baru.');
+      }
 
-        if (user.role === 'student' && activeCount >= limit) {
-          if (!data.grantId) {
-            const err = new Error(`Maximum self-service VM limit (${limit}) reached. Request approval for additional VMs.`);
-            err.code = 'vm_limit_reached';
-            err.limit = limit;
-            err.current = activeCount;
-            err.canRequest = true;
-            throw err;
-          }
+      const studentId = user.id;
+      const activeStatuses = ['creating', 'running', 'stopped', 'error', 'restarting'];
+      const activeCount = vmDb.filter((v) => v.owner === studentId && activeStatuses.includes(v.status)).length;
+      const limit = userVmLimitDb.get(studentId) || user.maxSelfServiceVms || policyDb.maxSelfServiceVms;
 
-          // Validate grant token
-          const grant = vmRequestDb.find((r) => r.grantId === data.grantId && r.studentId === studentId);
-          if (!grant || grant.status !== 'approved') {
-            const err = new Error('Invalid or already fulfilled approval grant token');
-            err.code = 'invalid_grant';
-            throw err;
-          }
-          if (grant.approvalExpiresAt && new Date(grant.approvalExpiresAt).getTime() < Date.now()) {
-            grant.status = 'expired';
-            const err = new Error('Approval grant has expired');
-            err.code = 'grant_expired';
-            throw err;
-          }
-
-          grant.status = 'fulfilled';
-          grant.fulfilledAt = new Date().toISOString();
+      if (user.role === 'student' && activeCount >= limit) {
+        if (!data.grantId) {
+          const err = new Error(`Maximum self-service VM limit (${limit}) reached. Request approval for additional VMs.`);
+          err.code = 'vm_limit_reached';
+          err.limit = limit;
+          err.current = activeCount;
+          err.canRequest = true;
+          throw err;
         }
 
-        const newId = `vm-${Date.now()}`;
-        const newVm = {
-          id: newId,
-          name: data.name || `lab-vm-${Date.now().toString().slice(-4)}`,
-          os: data.os || 'kali',
-          vcpu: Number(data.vcpu) || 2,
-          ram: Number(data.ram) || 4,
-          disk: Number(data.disk) || 30,
-          ip: `10.10.1.${40 + vmDb.length}`,
-          vpc: data.vpc || 'vpc-cs401-01',
-          status: 'running',
-          idleSeconds: 3600,
-          owner: studentId,
-          tenant: data.cohort || (user.cohorts ? user.cohorts[0] : 'CS-401')
-        };
+        const grant = vmRequestDb.find((r) => r.grantId === data.grantId && r.studentId === studentId);
+        if (!grant || grant.status !== 'approved') {
+          const err = new Error('Invalid or already fulfilled approval grant token');
+          err.code = 'invalid_grant';
+          throw err;
+        }
+        if (grant.approvalExpiresAt && new Date(grant.approvalExpiresAt).getTime() < Date.now()) {
+          grant.status = 'expired';
+          const err = new Error('Approval grant has expired');
+          err.code = 'grant_expired';
+          throw err;
+        }
 
-        vmDb.push(newVm);
-        logEvent('VM_CREATE', newVm.name);
-        emit('vms:changed');
-        return newVm;
-      }),
+        grant.status = 'fulfilled';
+        grant.fulfilledAt = new Date().toISOString();
+      }
+
+      let serverVm = null;
+      try {
+        const res = await fetch('/api/vms', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({
+            name: data.name,
+            os: 'kali',
+            vcpu: Number(data.vcpu) || 2,
+            ram: Number(data.ram) || 4,
+            disk: Number(data.disk) || 30,
+            vpc: data.vpc || 'vpc-cs401-01',
+            cohort: data.cohort || user.cohort || (user.cohorts ? user.cohorts[0] : 'CS-401')
+          })
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const err = new Error(payload?.error || 'Gagal membuat VM');
+          if (payload?.code) err.code = payload.code;
+          throw err;
+        }
+        serverVm = payload?.vm || null;
+      } catch (err) {
+        if (err?.code === 'vm_limit_reached' || err?.message?.includes('Kali Linux') || err?.message?.includes('Provisioner')) {
+          throw err;
+        }
+      }
+
+      const newVm = serverVm || {
+        id: `vm-${Date.now()}`,
+        name: data.name || `kali-lab-${Date.now().toString().slice(-4)}`,
+        os: 'kali',
+        vcpu: Number(data.vcpu) || 2,
+        ram: Number(data.ram) || 4,
+        disk: Number(data.disk) || 30,
+        ip: `10.10.1.${40 + vmDb.length}`,
+        vpc: data.vpc || 'vpc-cs401-01',
+        status: 'running',
+        idleSeconds: 3600,
+        owner: studentId,
+        tenant: data.cohort || user.cohort || (user.cohorts ? user.cohorts[0] : 'CS-401'),
+        rdpHost: 'kali-lab-01'
+      };
+
+      const existingIdx = vmDb.findIndex((v) => v.id === newVm.id);
+      if (existingIdx >= 0) vmDb[existingIdx] = newVm;
+      else vmDb.push(newVm);
+      persistVms();
+      logEvent('VM_CREATE', newVm.name);
+      emit('vms:changed');
+      return newVm;
+    },
     getQuota: (studentId) =>
       call(() => {
         const { user } = useAuth();
@@ -164,120 +209,142 @@ export const api = {
     }),
 
   users: {
-    list: () =>
-      call(() => {
-        const { user } = useAuth();
-        if (!user || user.role === 'student') throw forbidden();
+    list: async () => {
+      const { user } = useAuth();
+      if (!user || user.role === 'student') throw forbidden();
+      try {
+        const res = await fetch('/api/admin/users', { credentials: 'same-origin' });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data?.users)) {
+            if (user.role === 'admin') replaceUsersFromServer(data.users);
+            return data.users;
+          }
+        }
+      } catch { /* fallback to local store */ }
+      return call(() => {
         if (user.role === 'admin') return [...users];
-        // Instructor only sees students in their own cohorts
-        return users.filter((u) => u.role === 'student' && user.cohorts.includes(u.cohort));
-      }),
-    create: (data) =>
-      call(() => {
-        const { user } = useAuth();
-        if (!user || user.role === 'student') throw forbidden();
-        if (user.role === 'instructor' && data.role !== 'student') throw forbidden();
-        if (user.role === 'instructor' && !user.cohorts.includes(data.cohort)) throw forbidden();
+        return users.filter((u) => u.role === 'student' && (user.cohorts || []).includes(u.cohort));
+      });
+    },
+    create: async (data) => {
+      const { user } = useAuth();
+      if (!user || user.role === 'student') throw forbidden();
+      if (user.role === 'instructor' && data.role !== 'student') throw forbidden();
 
-        const tempPass = `temp-${Math.random().toString(36).slice(2, 10)}`;
-        const newUser = {
-          id: `u-${Date.now()}`,
-          name: data.name,
-          email: data.email,
-          role: data.role || 'student',
-          nim: data.idNum,
-          staffId: data.role !== 'student' ? data.idNum : undefined,
-          cohort: data.cohort,
-          cohorts: data.cohort ? [data.cohort] : [],
-          status: user.role === 'instructor' ? 'pending' : 'active',
-          password: tempPass,
-          mustChangePassword: true,
-          lastLogin: null,
-          quota: data.quota || { vcpu: 8, ram: 16, storage: 150, vms: 4 },
-          idleTimeoutMin: data.idleTimeoutMin || 60,
-          createdBy: user.id
-        };
-        users.push(newUser);
-        logEvent('USER_CREATE', newUser.email);
-        emit('users:changed');
-        return { user: newUser, tempPassword: tempPass };
-      }),
-    bulkImport: (rows) =>
-      call(() => {
-        const { user } = useAuth();
-        if (!user || user.role === 'student') throw forbidden();
-        const created = [];
-        for (const row of rows) {
-          const tempPass = `temp-${Math.random().toString(36).slice(2, 10)}`;
-          const u = {
-            id: `u-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-            name: row.name,
-            email: row.email,
-            role: 'student',
-            nim: row.nim,
-            cohort: row.cohort,
-            cohorts: [row.cohort],
-            status: user.role === 'instructor' ? 'pending' : 'active',
-            password: tempPass,
-            mustChangePassword: true,
-            lastLogin: null,
-            quota: { vcpu: 8, ram: 16, storage: 150, vms: 4 },
-            idleTimeoutMin: 60,
-            createdBy: user.id
-          };
-          users.push(u);
-          created.push(u);
-        }
-        logEvent('USER_IMPORT_BULK', `${created.length} students`);
-        emit('users:changed');
-        return created;
-      }),
-    update: (id, updates) =>
-      call(() => {
-        const u = userById(id);
-        if (!u) throw new Error('User not found');
-        Object.assign(u, updates);
-        emit('users:changed');
-        return u;
-      }),
-    delete: (id) =>
-      call(() => {
-        const idx = users.findIndex((u) => u.id === id);
-        if (idx === -1) throw new Error('User not found');
-        const [u] = users.splice(idx, 1);
-        logEvent('USER_DELETE', u.email);
-        emit('users:changed');
-        return true;
-      }),
-    action: (id, action) =>
-      call(() => {
-        const u = userById(id);
-        if (!u) throw new Error('User not found');
-        if (action === 'approve') {
-          u.status = 'active';
-          logEvent('USER_APPROVE', u.email);
-        } else if (action === 'reject') {
-          users.splice(users.indexOf(u), 1);
-          logEvent('USER_REJECT', u.email);
-        } else if (action === 'suspend') {
-          u.status = 'suspended';
-          logEvent('USER_SUSPEND', u.email);
-        } else if (action === 'activate') {
-          u.status = 'active';
-          logEvent('USER_ACTIVATE', u.email);
-        } else if (action === 'resetPass') {
-          const newPass = `reset-${Math.random().toString(36).slice(2, 10)}`;
-          u.password = newPass;
-          u.mustChangePassword = true;
-          logEvent('USER_RESET_PASSWORD', u.email);
-          emit('users:changed');
-          return { tempPassword: newPass };
-        } else if (action === 'resetMfa') {
-          logEvent('USER_RESET_MFA', u.email);
-        }
-        emit('users:changed');
-        return true;
-      })
+      const res = await fetch('/api/admin/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify(data)
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload?.error || 'Failed to create user');
+      }
+      if (payload?.user) {
+        upsertUser({
+          ...payload.user,
+          passwordHash: payload.tempPassword ? await sha256Hex(payload.tempPassword) : undefined
+        });
+      }
+      logEvent('USER_CREATE', payload?.user?.email || data.email);
+      emit('users:changed');
+      return { user: payload.user, tempPassword: payload.tempPassword };
+    },
+    bulkImport: async (rows) => {
+      const { user } = useAuth();
+      if (!user || user.role === 'student') throw forbidden();
+      const created = [];
+      for (const row of rows) {
+        const res = await api.users.create({
+          name: row.name,
+          email: row.email,
+          idNum: row.nim,
+          cohort: row.cohort,
+          role: 'student',
+          mustChangePassword: true
+        });
+        created.push(res.user);
+      }
+      logEvent('USER_IMPORT_BULK', `${created.length} students`);
+      emit('users:changed');
+      return created;
+    },
+    update: async (id, updates) => {
+      const res = await fetch(`/api/admin/users/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify(updates)
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload?.error || 'Failed to update user');
+      }
+      const u = userById(id);
+      const localUpdates = { ...(payload?.user || updates) };
+      if (updates.password) {
+        localUpdates.passwordHash = await sha256Hex(updates.password);
+        delete localUpdates.password;
+      }
+      if (u) {
+        Object.assign(u, localUpdates);
+        persistUsers();
+      } else if (payload?.user) {
+        upsertUser(localUpdates);
+      }
+      logEvent('USER_UPDATE', localUpdates.email || id);
+      emit('users:changed');
+      return payload?.user || u;
+    },
+    setPassword: async (id, password, mustChangePassword = false) => {
+      return api.users.update(id, { password, mustChangePassword });
+    },
+    delete: async (id) => {
+      const res = await fetch(`/api/admin/users/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        credentials: 'same-origin'
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(payload?.error || 'Failed to delete user');
+      }
+      const idx = users.findIndex((u) => u.id === id);
+      if (idx !== -1) {
+        const [removed] = users.splice(idx, 1);
+        persistUsers();
+        logEvent('USER_DELETE', removed.email);
+      }
+      emit('users:changed');
+      return true;
+    },
+    action: async (id, action) => {
+      const u = userById(id);
+      if (!u) throw new Error('User not found');
+      if (action === 'approve') {
+        await api.users.update(id, { status: 'active' });
+        logEvent('USER_APPROVE', u.email);
+      } else if (action === 'reject') {
+        await api.users.delete(id);
+        logEvent('USER_REJECT', u.email);
+      } else if (action === 'suspend') {
+        await api.users.update(id, { status: 'suspended' });
+        logEvent('USER_SUSPEND', u.email);
+      } else if (action === 'activate') {
+        await api.users.update(id, { status: 'active' });
+        logEvent('USER_ACTIVATE', u.email);
+      } else if (action === 'resetPass') {
+        const newPass = `PTaaS-${Math.random().toString(36).slice(2, 10)}!`;
+        await api.users.update(id, { password: newPass, mustChangePassword: true });
+        logEvent('USER_RESET_PASSWORD', u.email);
+        return { tempPassword: newPass };
+      } else if (action === 'resetMfa') {
+        logEvent('USER_RESET_MFA', u.email);
+      }
+      emit('users:changed');
+      return true;
+    }
   },
 
   cohorts: {

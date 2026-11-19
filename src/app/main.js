@@ -1,5 +1,5 @@
 import { startRouter } from '../lib/router.js';
-import { useAuth } from '../lib/auth.js';
+import { useAuth, hydrateSessionFromServer } from '../lib/auth.js';
 import { routes } from './routes.js';
 import { createAppLayout, createBareLayout } from './shell.js';
 import { forbiddenView, notFoundView } from '../features/auth/errors.js';
@@ -28,6 +28,7 @@ export function initPtaasApp() {
   });
 
   startIdleTicker();
+  hydrateSessionFromServer();
 
   const app = createAppLayout(root);
   startRouter({
