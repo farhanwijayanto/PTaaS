@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { getSessionFromRequest } from '@/lib/server-auth';
-import { findVmByIdOrName } from '@/lib/server-store';
+import { getVmStatusService } from '@/lib/vm-status-service';
 
 export const dynamic = 'force-dynamic';
 
@@ -39,7 +39,6 @@ const SSH_COLOR_SCHEMES: Record<string, string> = {
 };
 
 export async function GET(req: Request) {
-  // Enforce authenticated session cookie
   const session = getSessionFromRequest(req);
   if (!session) {
     return NextResponse.json(
@@ -62,42 +61,54 @@ export async function GET(req: Request) {
   const themeKey = (url.searchParams.get('theme') || 'kali').toLowerCase();
   const colorScheme = SSH_COLOR_SCHEMES[themeKey] || SSH_COLOR_SCHEMES.kali;
 
-  const defaultHost = process.env.GUAC_DEFAULT_HOST || 'kali-lab-01';
-  const multiHost = process.env.GUAC_MULTI_HOST === 'true';
+  if (!requestedVm) {
+    return NextResponse.json({ error: 'VM identifier is required', code: 'vm_required' }, { status: 400 });
+  }
 
-  let targetHost = defaultHost;
-  let vmLabel = requestedVm || defaultHost;
+  const service = getVmStatusService();
+  let target;
+  try {
+    target = await service.resolveTunnelTarget(session, requestedVm);
+  } catch (err) {
+    const e = err as Error & { statusCode?: number; code?: string };
+    return NextResponse.json(
+      { error: e.message || 'Failed to resolve VM target', ...(e.code ? { code: e.code } : {}) },
+      { status: e.statusCode || 500 }
+    );
+  }
 
-  if (requestedVm) {
-    const matched = findVmByIdOrName(requestedVm);
-    if (matched) {
-      // Enforce ownership for students
-      if (session.role === 'student' && matched.owner !== session.userId) {
-        return NextResponse.json({ error: 'Forbidden: VM belongs to another user.' }, { status: 403 });
-      }
-      targetHost = matched.rdpHost || (multiHost ? matched.name : defaultHost);
-      vmLabel = matched.name;
-    } else if (multiHost && /^[a-zA-Z0-9-]+$/.test(requestedVm)) {
-      targetHost = requestedVm;
-      vmLabel = requestedVm;
-    }
+  if (!target) {
+    return NextResponse.json(
+      { error: 'Virtual machine not found or access denied', code: 'vm_not_found' },
+      { status: 404 }
+    );
+  }
+
+  if (target.vm.status !== 'running') {
+    return NextResponse.json(
+      {
+        error: 'VM is not running. Start the VM before opening desktop or terminal.',
+        code: 'vm_not_running',
+        status: target.vm.status,
+      },
+      { status: 409 }
+    );
   }
 
   const username = process.env.GUAC_KALI_USER || 'student';
-  const password = process.env.GUAC_KALI_PASS || 'student123';
-
   const iv = crypto.randomBytes(16);
 
+  // Route strictly to THIS VM's live internal container IP and unique per-VM password (never shared host/password)
   const payload =
     protocol === 'ssh'
       ? {
           connection: {
             type: 'ssh',
             settings: {
-              hostname: targetHost,
-              port: '22',
+              hostname: target.host,
+              port: String(target.sshPort || 2222),
               username,
-              password,
+              password: target.password,
               'font-name': 'monospace',
               'font-size': fontSize,
               'color-scheme': colorScheme,
@@ -107,21 +118,29 @@ export async function GET(req: Request) {
               dpi: '96',
             },
           },
+          scope: {
+            vmId: target.vm.id,
+            userId: session.userId,
+          },
         }
       : {
           connection: {
             type: 'rdp',
             settings: {
-              hostname: targetHost,
-              port: '3389',
+              hostname: target.host,
+              port: String(target.rdpPort || 3389),
               username,
-              password,
+              password: target.password,
               'ignore-cert': 'true',
               security: 'any',
               'resize-method': 'display-update',
               width,
               height,
             },
+          },
+          scope: {
+            vmId: target.vm.id,
+            userId: session.userId,
           },
         };
 
@@ -135,11 +154,22 @@ export async function GET(req: Request) {
   };
 
   const token = Buffer.from(JSON.stringify(tokenData)).toString('base64');
+  const sessionTokenId = crypto.createHash('sha256').update(token).digest('hex').slice(0, 16);
 
+  service.registerActiveSession({
+    tokenId: sessionTokenId,
+    vmId: target.vm.id,
+    userId: session.userId,
+    protocol,
+  });
+
+  // Never return passwords in API responses
   return NextResponse.json({
     token,
-    vm: vmLabel,
-    host: targetHost,
+    sessionTokenId,
+    vm: target.vm.name,
+    vmId: target.vm.id,
+    host: target.host,
     protocol,
     user: session.email,
     role: session.role,

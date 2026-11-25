@@ -1,33 +1,24 @@
-import { vmDb } from '../../mock/vms.js';
-import { logEvent } from '../../mock/audit.js';
-import { emit } from '../../lib/events.js';
+import { getVisibleVms } from '../../lib/vm-store.js';
 import { formatIdle } from '../../lib/format.js';
-import { useAuth } from '../../lib/auth.js';
-import { t } from '../../lib/i18n.js';
-import { toast } from '../../components/ui/toast.js';
 
-// Counts idle timers down once a second and updates every [data-idle] node in place
-// (no re-render). A VM that reaches 00:00 is stopped, which is the PRD's auto-stop rule.
+// Updates visible [data-idle] countdown cells once a second using server-derived idleSeconds.
+// Never mutates VM runtime status client-side; Docker remains the single source of truth.
 export function startIdleTicker() {
   setInterval(() => {
-    let changed = false;
-    for (const vm of vmDb) {
-      if (vm.status !== 'running') continue;
-      vm.idleSeconds = Math.max(0, vm.idleSeconds - 1);
-      if (vm.idleSeconds === 0) {
-        vm.status = 'stopped';
-        changed = true;
-        logEvent('AUTO_STOP', vm.name, 'AUTO_STOPPED');
-        const { user } = useAuth();
-        if (user && (user.role !== 'student' || vm.owner === user.id)) {
-          toast({ title: t('vm.autostop', { name: vm.name }), kind: 'info' });
-        }
+    const nodes = document.querySelectorAll('[data-idle]');
+    if (!nodes.length) return;
+    const vms = getVisibleVms();
+    const now = Date.now();
+    nodes.forEach((el) => {
+      const vm = vms.find((v) => v.id === el.dataset.idle);
+      if (!vm || vm.status !== 'running' || vm.stale || vm.idleSeconds == null) {
+        el.textContent = '—';
+        return;
       }
-    }
-    document.querySelectorAll('[data-idle]').forEach((el) => {
-      const vm = vmDb.find((v) => v.id === el.dataset.idle);
-      if (vm?.status === 'running') el.textContent = formatIdle(vm.idleSeconds);
+      const updatedMs = vm.statusUpdatedAt ? Date.parse(vm.statusUpdatedAt) : now;
+      const driftSec = Number.isFinite(updatedMs) ? Math.max(0, Math.floor((now - updatedMs) / 1000)) : 0;
+      const remaining = Math.max(0, vm.idleSeconds - driftSec);
+      el.textContent = formatIdle(remaining);
     });
-    if (changed) emit('vms:changed');
   }, 1000);
 }

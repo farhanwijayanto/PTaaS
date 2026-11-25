@@ -25,6 +25,7 @@ pnpm-debug.log*
 Thumbs.db
 
 # Keys, certs & local databases
+.data/
 *.pem
 *.key
 *.p12

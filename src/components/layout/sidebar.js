@@ -3,7 +3,7 @@ import { t } from '../../lib/i18n.js';
 import { useAuth } from '../../lib/auth.js';
 import { visibleNav, findActive } from '../../app/nav.js';
 import { initials } from '../../lib/format.js';
-import { vmDb } from '../../mock/vms.js';
+import { getVisibleVms, getRunningVms } from '../../lib/vm-store.js';
 
 export function toggleSidebar() {
   const root = document.documentElement;
@@ -27,7 +27,6 @@ export const closeMobileSidebar = () => {
   document.documentElement.removeAttribute('data-sb-open');
 };
 
-// Close on Escape key when mobile sidebar is open
 if (typeof window !== 'undefined') {
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && document.documentElement.hasAttribute('data-sb-open')) {
@@ -36,18 +35,19 @@ if (typeof window !== 'undefined') {
   });
 }
 
-function navLink(item, active, role, user) {
+function navLink(item, active, role) {
   const isActive = active?.path === item.path;
 
-  // Small badge pills (dynamic VM count, pending approvals)
+  // Dynamic VM badge counts ONLY running VMs; hidden when 0.
   let badgeEl = null;
   if (item.path === '/vms') {
-    const visibleCount = role === 'student'
-      ? vmDb.filter((v) => v.owner === user?.id).length
-      : vmDb.length;
-    badgeEl = h('span', {
-      class: 'sb-badge ml-auto rounded-full bg-[var(--accent-bg)] px-1.5 py-0.2 text-[11px] font-mono font-medium text-[var(--accent-text)]'
-    }, String(visibleCount));
+    const runningCount = getRunningVms().length;
+    if (runningCount > 0) {
+      badgeEl = h('span', {
+        'data-sidebar-vm-badge': 'true',
+        class: 'sb-badge ml-auto rounded-full bg-[var(--accent-bg)] px-1.5 py-0.2 text-[11px] font-mono font-medium text-[var(--accent-text)]'
+      }, String(runningCount));
+    }
   } else if (item.path === '/approvals' && (role === 'admin' || role === 'instructor')) {
     badgeEl = h('span', {
       class: 'sb-badge ml-auto rounded-full bg-[var(--warning-bg)] px-1.5 py-0.2 text-[11px] font-mono font-medium text-[var(--warning-text)]'
@@ -79,25 +79,24 @@ function navLink(item, active, role, user) {
 }
 
 function quotaMiniMeter(user) {
-  if (user.role !== 'student') return null;
+  if (!user || user.role !== 'student') return null;
 
   const quota = user.quota || { vcpu: 8, ram: 16 };
-  const ownedVms = vmDb.filter((v) => v.owner === user.id);
-  const activeVms = ownedVms.filter((v) => v.status !== 'stopped');
-  const usedVcpu = activeVms.reduce((s, v) => s + (v.vcpu || 0), 0);
-  const usedRam = activeVms.reduce((s, v) => s + (v.ram || 0), 0);
+  const ownedVms = getVisibleVms().filter((v) => v.owner === user.id);
+  const runningVms = ownedVms.filter((v) => v.status === 'running' && !v.stale);
+  const usedVcpu = runningVms.reduce((s, v) => s + (v.vcpu || 0), 0);
+  const usedRam = runningVms.reduce((s, v) => s + (v.ram || 0), 0);
   const vmLimit = user.maxSelfServiceVms || 3;
   const usedVms = ownedVms.length;
-  const vcpuPct = Math.min(100, Math.round((usedVcpu / quota.vcpu) * 100));
-  const ramPct = Math.min(100, Math.round((usedRam / quota.ram) * 100));
+  const vcpuPct = Math.min(100, Math.round((usedVcpu / Math.max(1, quota.vcpu)) * 100));
+  const ramPct = Math.min(100, Math.round((usedRam / Math.max(1, quota.ram)) * 100));
 
-  return h('div', { class: 'sb-quota rounded-lg border border-line bg-surface/60 p-2.5 space-y-2 mb-2 text-xs' },
+  return h('div', { class: 'sb-quota rounded-lg border border-line bg-surface/60 p-2.5 space-y-2 mb-2 text-xs', 'data-sidebar-quota': 'true' },
     h('div', { class: 'flex items-center justify-between text-[11px] text-muted' },
       h('span', {}, 'Student Quota'),
       h('span', { class: 'font-mono text-accent' }, `${usedVms}/${vmLimit} VMs`)
     ),
     h('div', { class: 'space-y-1.5' },
-      // Segmented VM slots
       h('div', { class: 'space-y-0.5' },
         h('div', { class: 'flex justify-between text-[10px] text-subtle font-mono' },
           h('span', {}, 'VM Slots'),
@@ -117,19 +116,19 @@ function quotaMiniMeter(user) {
       h('div', { class: 'space-y-0.5' },
         h('div', { class: 'flex justify-between text-[10px] text-subtle font-mono' },
           h('span', {}, 'vCPU'),
-          h('span', {}, `${usedVcpu}/${quota.vcpu}`)
+          h('span', { 'data-sidebar-vcpu': 'true' }, `${usedVcpu}/${quota.vcpu}`)
         ),
         h('div', { class: 'h-1 w-full rounded-full bg-raised overflow-hidden' },
-          h('div', { class: 'h-full bg-accent rounded-full', style: `width: ${vcpuPct}%` })
+          h('div', { class: 'h-full bg-accent rounded-full transition-[width] duration-200', style: `width: ${vcpuPct}%` })
         )
       ),
       h('div', { class: 'space-y-0.5' },
         h('div', { class: 'flex justify-between text-[10px] text-subtle font-mono' },
           h('span', {}, 'RAM'),
-          h('span', {}, `${usedRam}/${quota.ram} GB`)
+          h('span', { 'data-sidebar-ram': 'true' }, `${usedRam}/${quota.ram} GB`)
         ),
         h('div', { class: 'h-1 w-full rounded-full bg-raised overflow-hidden' },
-          h('div', { class: 'h-full bg-accent rounded-full', style: `width: ${ramPct}%` })
+          h('div', { class: 'h-full bg-accent rounded-full transition-[width] duration-200', style: `width: ${ramPct}%` })
         )
       )
     )
@@ -141,7 +140,6 @@ export function Sidebar({ path }) {
   const groups = visibleNav(role);
   const active = findActive(role, path);
 
-  // Brand Header
   const brand = h('div', {
     class: 'flex h-14 shrink-0 items-center justify-between border-b border-line px-4'
   },
@@ -159,27 +157,25 @@ export function Sidebar({ path }) {
     h('span', { class: 'sb-label rounded-md border border-line bg-raised px-1.5 py-0.5 font-mono text-[10px] text-muted uppercase' }, role)
   );
 
-  // Navigation Items Grouped with strict 24px top spacing above group labels, 8px below
   const nav = h('nav', {
     class: 'flex-1 overflow-y-auto px-3 py-3',
     'aria-label': t('nav.label')
   },
     groups.map((g) => h('div', { class: 'sb-group mt-6 first:mt-2' },
       g.group && h('div', { class: 'sb-group-label mb-2' }, t(g.group)),
-      h('div', { class: 'space-y-1' }, g.items.map((item) => navLink(item, active, role, user)))
+      h('div', { class: 'space-y-1' }, g.items.map((item) => navLink(item, active, role)))
     ))
   );
 
-  // Bottom Section: Quota + User Card + Collapse Toggle
   const userCard = h('div', {
     class: 'flex items-center gap-2.5 rounded-lg p-1.5 hover:bg-raised/60 transition-colors select-none'
   },
     h('span', {
       class: 'flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface border border-line font-mono text-xs font-semibold text-fg'
-    }, initials(user.name)),
+    }, initials(user?.name || '')),
     h('div', { class: 'sb-user-text min-w-0 flex-1' },
-      h('p', { class: 'truncate text-xs font-medium text-fg' }, user.name),
-      h('p', { class: 'truncate text-[11px] text-muted capitalize' }, user.role)
+      h('p', { class: 'truncate text-xs font-medium text-fg' }, user?.name || ''),
+      h('p', { class: 'truncate text-[11px] text-muted capitalize' }, user?.role || '')
     )
   );
 

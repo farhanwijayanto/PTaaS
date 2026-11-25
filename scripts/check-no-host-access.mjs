@@ -33,10 +33,13 @@ const BANNED = [
   { name: 'new Function(', re: /\bnew\s+Function\s*\(/ },
 ];
 
-// Exclude QA scripts in tests/ that spawn headless chrome locally for screenshots
+// Exclude QA/E2E & image-prep scripts that spawn local test servers, headless chrome, or docker CLI
 const TEST_SPAWN_ALLOW = new Set([
   'tests/capture-deliverables.js',
   'tests/landing-decor-qa.js',
+  'tests/docker-vm-status.e2e.mjs',
+  'tests/vm-create-isolation.e2e.mjs',
+  'scripts/prepare-images.mjs',
 ]);
 
 function walk(dir, out = []) {
@@ -59,7 +62,7 @@ for (const file of walk(ROOT)) {
   const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
   lines.forEach((line, idx) => {
     for (const rule of BANNED) {
-      if ((rule.name === 'child_process' || rule.name === 'spawn(') && TEST_SPAWN_ALLOW.has(rel)) continue;
+      if ((rule.name === 'child_process' || rule.name === 'spawn(' || rule.name === 'execFile') && TEST_SPAWN_ALLOW.has(rel)) continue;
       if (rel === 'README.md' && (rule.name === 'ssh2' || rule.name === '/mnt/c')) continue;
       if (rule.re.test(line)) {
         violations.push(`${rel}:${idx + 1} [${rule.name}] ${line.trim().slice(0, 100)}`);

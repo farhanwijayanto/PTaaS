@@ -6,78 +6,203 @@ import { onCleanup } from '../../lib/router.js';
 import { useAuth } from '../../lib/auth.js';
 import { formatIdle } from '../../lib/format.js';
 import { OS } from '../../mock/vms.js';
+import {
+  getVmState,
+  getVisibleVms,
+  subscribeVms,
+  refreshVms,
+} from '../../lib/vm-store.js';
 import { button } from '../../components/ui/button.js';
 import { searchInput, select } from '../../components/ui/input.js';
 import { table } from '../../components/ui/table.js';
 import { dropdown } from '../../components/ui/dropdown.js';
 import { skeletonRows } from '../../components/ui/skeleton.js';
 import { emptyState, errorState } from '../../components/ui/empty-state.js';
-import { statusDot } from '../../components/ui/status-dot.js';
+import { statusDot, liveStatusIndicator, dockerWarningBanner } from '../../components/ui/status-dot.js';
 import { pageHeader } from '../../components/layout/page-header.js';
 import { PageContainer } from '../../components/layout/page-container.js';
 import { toast } from '../../components/ui/toast.js';
-import { osTile, runVmAction, specsText, vmMenuItems } from './vm-actions.js';
+import { osTile, runVmAction, runOrphanCleanup, specsText, vmMenuItems } from './vm-actions.js';
 import { openVmRequestModal } from './vm-request-modal.js';
 
-function columns(showOwner) {
+const PAGE_SIZE = 25;
+
+function columns(showOwner, isAdmin) {
   const cols = [
     {
       key: 'name', label: t('vm.col.name'),
-      render: (vm) => h('div', { class: 'flex items-center gap-3' }, osTile(vm.os),
+      render: (vm) => h('div', { class: 'flex items-center gap-3', 'data-vm-row': vm.id }, osTile(vm.os),
         h('div', { class: 'min-w-0' },
           h('div', { class: 'truncate font-medium' }, vm.name),
-          h('div', { class: 't-caption' }, OS[vm.os]?.label)))
+          h('div', { class: 't-caption' }, OS[vm.os]?.label || vm.os)))
     },
-    { key: 'status', label: t('vm.col.status'), render: (vm) => statusDot(vm.status) },
+    { key: 'status', label: t('vm.col.status'), render: (vm) => statusDot(vm) },
     { key: 'specs', label: t('vm.col.specs'), class: 'hidden text-muted md:table-cell', render: specsText },
-    { key: 'ip', label: t('vm.col.ip'), render: (vm) => h('span', { class: 'font-mono text-muted' }, vm.ip) },
+    { key: 'ip', label: t('vm.col.ip'), render: (vm) => h('span', { class: 'font-mono text-muted' }, vm.ip || '—') },
     {
       key: 'idle', label: t('vm.col.idle'), class: 'hidden sm:table-cell',
-      render: (vm) => vm.status === 'running'
+      render: (vm) => vm.status === 'running' && !vm.stale && vm.idleSeconds != null
         ? h('span', { class: 'num font-mono', 'data-idle': vm.id }, formatIdle(vm.idleSeconds))
         : h('span', { class: 'text-subtle' }, '—')
     }
   ];
-  if (showOwner) cols.splice(2, 0, { key: 'owner', label: t('vm.col.owner'), class: 'hidden text-muted lg:table-cell', render: (vm) => vm.ownerName });
+  if (showOwner) {
+    cols.splice(2, 0, {
+      key: 'owner',
+      label: t('vm.col.owner'),
+      class: 'hidden text-muted lg:table-cell',
+      render: (vm) => vm.ownerName || vm.owner
+    });
+  }
   cols.push({
-    key: 'actions', label: t('vm.col.actions'), srOnly: true, class: 'w-28',
+    key: 'actions', label: t('vm.col.actions'), srOnly: true, class: 'w-44',
     render: (vm) => {
-      const running = vm.status === 'running';
+      const running = vm.status === 'running' && !vm.stale;
+      const busy = vm.status === 'starting' || vm.status === 'stopping';
+      const staleOrUnknown = vm.stale || vm.status === 'unknown';
+      const isMissing = vm.status === 'missing';
+      const canStart = !staleOrUnknown && !busy && (vm.status === 'stopped' || vm.status === 'paused' || (vm.status === 'error' && Boolean(vm.containerId)));
+
       const more = h('button', {
         type: 'button', 'aria-label': `${t('vm.act.more')}: ${vm.name}`,
-        class: 'flex h-8 w-8 items-center justify-center rounded-lg text-muted transition-colors duration-150 hover:bg-raised hover:text-fg'
+        class: 'flex h-8 w-8 items-center justify-center rounded-lg text-muted transition-colors duration-150 hover:bg-raised hover:text-fg cursor-pointer'
       }, icon('ellipsis', 'w-4 h-4'));
-      return h('div', { class: 'flex justify-end gap-0.5' },
-        button({ icon: 'monitor', variant: 'ghost', size: 'icon', ariaLabel: `${t('vm.act.gui')}: ${vm.name}`, disabled: !running, onClick: () => runVmAction(vm, 'gui') }),
-        button({ icon: 'terminal', variant: 'ghost', size: 'icon', ariaLabel: `${t('vm.act.terminal')}: ${vm.name}`, disabled: !running, onClick: () => runVmAction(vm, 'terminal') }),
-        dropdown({ trigger: more, items: () => vmMenuItems(vm) }));
+
+      let primaryControl = null;
+      if (busy) {
+        primaryControl = h('span', {
+          class: 'inline-flex h-8 items-center gap-1.5 rounded-lg border border-line bg-raised px-2.5 text-xs font-medium text-muted',
+          'aria-live': 'polite',
+          'data-vm-busy': vm.status,
+        },
+          icon('loader-2', 'w-3.5 h-3.5 motion-safe:animate-spin'),
+          t(`vm.status.${vm.status}`)
+        );
+      } else if (isMissing && !staleOrUnknown) {
+        primaryControl = button({
+          label: t('vm.act.recreate'),
+          icon: 'refresh-cw',
+          variant: 'secondary',
+          size: 'xs',
+          attrs: { 'data-vm-action': 'recreate' },
+          onClick: () => runVmAction(vm, 'recreate')
+        });
+      } else if (canStart) {
+        primaryControl = button({
+          label: t('vm.act.start'),
+          icon: 'play',
+          variant: 'secondary',
+          size: 'xs',
+          attrs: { 'data-vm-action': 'start' },
+          onClick: () => runVmAction(vm, 'start')
+        });
+      } else if (running) {
+        primaryControl = h('div', { class: 'flex items-center gap-0.5' },
+          button({
+            icon: 'monitor', variant: 'ghost', size: 'icon',
+            ariaLabel: `${t('vm.act.gui')}: ${vm.name}`,
+            attrs: { 'data-vm-action': 'gui' },
+            disabled: !running,
+            onClick: () => runVmAction(vm, 'gui')
+          }),
+          button({
+            icon: 'terminal', variant: 'ghost', size: 'icon',
+            ariaLabel: `${t('vm.act.terminal')}: ${vm.name}`,
+            attrs: { 'data-vm-action': 'terminal' },
+            disabled: !running,
+            onClick: () => runVmAction(vm, 'terminal')
+          })
+        );
+      }
+
+      return h('div', { class: 'flex items-center justify-end gap-1' },
+        primaryControl,
+        dropdown({ trigger: more, items: () => vmMenuItems(vm, { isAdmin }) })
+      );
     }
   });
   return cols;
+}
+
+function orphansSection(orphans) {
+  if (!orphans || !orphans.length) return null;
+
+  const cols = [
+    {
+      key: 'name', label: t('vm.col.name'),
+      render: (o) => h('div', { class: 'space-y-0.5' },
+        h('div', { class: 'flex items-center gap-2' },
+          h('span', { class: 'font-medium text-fg' }, o.name),
+          h('span', {
+            class: 'rounded-full border border-[var(--warning-border)] bg-[var(--warning-bg)] px-2 py-0.5 font-mono text-[10px] font-medium text-[var(--warning-text)]'
+          }, t('vm.orphans.badge'))
+        ),
+        h('div', { class: 'font-mono text-[11px] text-muted' }, `${o.containerId.slice(0, 12)} · ${o.image}`)
+      )
+    },
+    { key: 'status', label: t('vm.col.status'), render: (o) => statusDot(o.status) },
+    { key: 'owner', label: t('vm.col.owner'), class: 'hidden md:table-cell', render: (o) => h('span', { class: 'font-mono text-xs text-muted' }, o.owner || '—') },
+    {
+      key: 'actions', label: t('vm.col.actions'), srOnly: true, class: 'w-32 text-right',
+      render: (o) => button({
+        label: t('vm.act.cleanup'),
+        icon: 'trash-2',
+        variant: 'danger-ghost',
+        size: 'xs',
+        onClick: () => runOrphanCleanup(o)
+      })
+    }
+  ];
+
+  return h('section', { class: 'mt-8 space-y-3', 'data-orphans-section': 'true' },
+    h('div', { class: 'space-y-0.5' },
+      h('h2', { class: 't-section' }, `${t('vm.orphans.title')} (${orphans.length})`),
+      h('p', { class: 'text-xs text-muted' }, t('vm.orphans.desc'))
+    ),
+    table({ columns: cols, rows: orphans, caption: t('vm.orphans.title') })
+  );
 }
 
 export function VmListPage() {
   const auth = useAuth();
   const showOwner = auth.role !== 'student';
   const isStudent = auth.role === 'student';
+  const isAdmin = auth.role === 'admin';
 
-  let all = [];
   let requests = [];
-  let state = 'loading'; // loading | ready | error
-  let currentTab = 'vms'; // 'vms' | 'requests'
+  let currentTab = 'vms';
   let query = '';
-  let status = 'all';
+  let statusFilter = 'all';
+  let page = 1;
 
+  const headerHost = h('div', {});
+  const bannerHost = h('div', {});
+  const tabsHost = h('div', {});
+  const controlsHost = h('div', {});
   const host = h('div', { 'aria-live': 'polite' });
-  const container = h('div', { class: 'space-y-4' });
+  const orphansHost = h('div', {});
+  const container = h('div', { class: 'space-y-4' }, headerHost, bannerHost, tabsHost, controlsHost, host, orphansHost);
 
-  const search = searchInput({ placeholder: t('vm.search'), ariaLabel: t('vm.search'), onInput: (v) => { query = v.trim().toLowerCase(); draw(); } });
+  const search = searchInput({
+    placeholder: t('vm.search'),
+    ariaLabel: t('vm.search'),
+    onInput: (v) => { query = v.trim().toLowerCase(); page = 1; drawTable(); }
+  });
+
   const filter = select({
-    ariaLabel: t('vm.filter.label'), value: 'all', onChange: (v) => { status = v; draw(); },
+    ariaLabel: t('vm.filter.label'),
+    value: 'all',
+    onChange: (v) => { statusFilter = v; page = 1; drawTable(); },
     options: [
       { value: 'all', label: t('vm.filter.all') },
       { value: 'running', label: t('vm.status.running') },
-      { value: 'stopped', label: t('vm.status.stopped') }
+      { value: 'starting', label: t('vm.status.starting') },
+      { value: 'stopping', label: t('vm.status.stopping') },
+      { value: 'stopped', label: t('vm.status.stopped') },
+      { value: 'paused', label: t('vm.status.paused') },
+      { value: 'missing', label: t('vm.status.missing') },
+      { value: 'error', label: t('vm.status.error') },
+      { value: 'unknown', label: t('vm.status.unknown') }
     ]
   });
 
@@ -106,13 +231,13 @@ export function VmListPage() {
     if (!requests.length) {
       return emptyState({
         icon: 'clipboard-list',
-        title: 'Belum Ada Permohonan VM',
-        description: 'Anda belum mengajukan permohonan VM tambahan ke instruktur.',
+        title: 'No VM requests yet',
+        description: 'You have not submitted a request for additional VMs.',
         action: button({
-          label: 'Ajukan VM Tambahan',
+          label: 'Request Additional VM',
           icon: 'send',
           variant: 'primary',
-          onClick: () => openVmRequestModal({ onSuccess: load })
+          onClick: () => openVmRequestModal({ onSuccess: loadRequests })
         })
       });
     }
@@ -120,7 +245,7 @@ export function VmListPage() {
     const requestCols = [
       {
         key: 'vm',
-        label: 'VM / SPESIFIKASI',
+        label: 'VM / Specs',
         render: (r) => h('div', { class: 'space-y-0.5' },
           h('div', { class: 'font-medium text-fg font-mono text-xs' }, r.requestedSpecs.name),
           h('div', { class: 'text-[11px] text-muted' }, `${OS[r.requestedSpecs.os]?.label || r.requestedSpecs.os} · ${r.requestedSpecs.vcpu} vCPU / ${r.requestedSpecs.ram}GB`)
@@ -128,59 +253,48 @@ export function VmListPage() {
       },
       {
         key: 'purpose',
-        label: 'ALASAN / TUJUAN',
+        label: 'Purpose',
         render: (r) => h('div', { class: 'max-w-xs text-xs text-muted leading-relaxed line-clamp-2' }, r.purpose)
       },
       {
         key: 'status',
-        label: 'STATUS',
+        label: 'Status',
         render: (r) => {
           let badgeClass = 'bg-[var(--warning-bg)] text-[var(--warning-text)] border-[var(--warning-border)]';
-          let label = 'Menunggu Persetujuan';
+          let label = 'Pending';
           if (r.status === 'approved') {
             badgeClass = 'bg-[var(--success-bg)] text-[var(--success-text)] border-[var(--success-border)]';
-            label = 'Disetujui (Ready to Launch)';
+            label = 'Approved';
           } else if (r.status === 'rejected') {
             badgeClass = 'bg-[var(--danger-bg)] text-[var(--danger-text)] border-[var(--danger-border)]';
-            label = 'Ditolak';
+            label = 'Rejected';
           } else if (r.status === 'fulfilled') {
             badgeClass = 'bg-raised text-muted border-line';
-            label = 'Selesai';
+            label = 'Fulfilled';
           } else if (r.status === 'cancelled') {
             badgeClass = 'bg-raised text-subtle border-line';
-            label = 'Dibatalkan';
+            label = 'Cancelled';
           }
-
-          return h('div', { class: 'space-y-1' },
-            h('span', { class: cx('inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-medium font-mono', badgeClass) },
-              h('span', { class: 'w-1.5 h-1.5 rounded-full bg-current' }),
-              label
-            ),
-            r.reviewNote && h('p', { class: 'text-[10px] text-[var(--danger-text)] italic max-w-xs' }, `Catatan: "${r.reviewNote}"`)
+          return h('span', { class: cx('inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-medium font-mono', badgeClass) },
+            h('span', { class: 'w-1.5 h-1.5 rounded-full bg-current' }),
+            label
           );
         }
-      },
-      {
-        key: 'time',
-        label: 'WAKTU',
-        class: 'hidden sm:table-cell',
-        render: (r) => h('span', { class: 'font-mono text-[11px] text-subtle' }, new Date(r.requestedAt).toLocaleDateString())
       },
       {
         key: 'actions',
         label: '',
         srOnly: true,
-        class: 'w-36 text-right',
+        class: 'w-32 text-right',
         render: (r) => {
           if (r.status === 'approved' && r.grantId) {
             return button({
-              label: 'Launch VM',
+              label: t('vm.active.launch'),
               icon: 'play',
               size: 'xs',
               variant: 'primary',
               onClick: async () => {
                 try {
-                  toast.info(`Launching approved VM ${r.requestedSpecs.name}...`);
                   await api.vms.create({
                     name: r.requestedSpecs.name,
                     os: r.requestedSpecs.os,
@@ -189,26 +303,26 @@ export function VmListPage() {
                     disk: r.requestedSpecs.disk,
                     grantId: r.grantId
                   });
-                  toast.success(`VM ${r.requestedSpecs.name} created successfully!`);
-                  load();
+                  toast({ title: `${r.requestedSpecs.name} created`, kind: 'success' });
+                  loadRequests();
                 } catch (err) {
-                  toast.error(err.message || 'Failed to create VM');
+                  toast({ title: t('common.error'), description: err.message, kind: 'error' });
                 }
               }
             });
           }
           if (r.status === 'pending') {
             return button({
-              label: 'Batalkan',
+              label: t('common.cancel'),
               size: 'xs',
               variant: 'ghost',
               onClick: async () => {
                 try {
                   await api.vmRequests.cancel(r.id);
-                  toast.info('Permohonan VM dibatalkan');
-                  load();
+                  toast({ title: 'Request cancelled', kind: 'info' });
+                  loadRequests();
                 } catch (err) {
-                  toast.error(err.message);
+                  toast({ title: t('common.error'), description: err.message, kind: 'error' });
                 }
               }
             });
@@ -218,118 +332,162 @@ export function VmListPage() {
       }
     ];
 
-    return table({ columns: requestCols, rows: requests, caption: 'Permohonan VM Tambahan' });
+    return table({ columns: requestCols, rows: requests, caption: 'VM Requests' });
   }
 
-  function draw() {
-    if (state === 'loading') return host.replaceChildren(skeletonRows(4));
-    if (state === 'error') return host.replaceChildren(errorState({ title: t('vm.error.title'), onRetry: load }));
-
-    if (currentTab === 'requests') {
-      return host.replaceChildren(renderRequestsTab());
-    }
-
-    if (!all.length) {
-      return host.replaceChildren(emptyState({
-        icon: 'server', title: t('vm.empty.title'), description: t('vm.empty.desc'),
-        action: button({ label: t('vm.new'), icon: 'plus', variant: 'primary', href: '/vms/new' })
-      }));
-    }
-    const rows = all.filter((vm) =>
-      (status === 'all' || vm.status === status) &&
-      (!query || vm.name.toLowerCase().includes(query) || vm.ip.includes(query)));
-    if (!rows.length) {
-      return host.replaceChildren(emptyState({ icon: 'search', title: t('vm.empty.filtered'), description: t('vm.empty.filteredDesc') }));
-    }
-    host.replaceChildren(table({ columns: columns(showOwner), rows, caption: t('vm.title') }));
-  }
-
-  async function load({ silent = false } = {}) {
-    if (!silent) { state = 'loading'; draw(); }
-    try {
-      all = await api.vms.list();
-      requests = await api.vmRequests.list().catch(() => []);
-      state = 'ready';
-    } catch {
-      if (silent) return;
-      state = 'error';
-    }
-    renderHeaderAndContent();
-    draw();
-  }
-
-  function renderHeaderAndContent() {
-    container.innerHTML = '';
-
-    const studentVmsCount = isStudent ? all.filter(v => v.owner === auth.user?.id).length : all.length;
-    const studentLimit = 3;
+  function drawChrome(vmState, allVms) {
+    const studentVmsCount = isStudent ? allVms.filter((v) => v.owner === auth.user?.id).length : allVms.length;
+    const studentLimit = auth.user?.maxSelfServiceVms || 3;
     const isAtLimit = isStudent && studentVmsCount >= studentLimit;
-    const pendingReqsCount = requests.filter(r => r.status === 'pending').length;
+    const pendingReqsCount = requests.filter((r) => r.status === 'pending').length;
 
-    // Header actions: Segmented meter + Primary CTA
-    const headerActions = h('div', { class: 'flex items-center gap-3' },
-      isStudent && renderSlotMeter(studentVmsCount, studentLimit),
-      isAtLimit
-        ? button({
-            label: 'Ajukan VM tambahan',
-            icon: 'send',
-            variant: 'primary',
-            onClick: () => openVmRequestModal({ onSuccess: load })
-          })
-        : button({
-            label: t('vm.new'),
-            icon: 'plus',
-            variant: 'primary',
-            href: '/vms/new'
-          })
+    headerHost.replaceChildren(
+      pageHeader({
+        title: t('vm.title'),
+        description: t('vm.desc'),
+        actions: h('div', { class: 'flex flex-wrap items-center gap-2.5' },
+          liveStatusIndicator(vmState),
+          isStudent && renderSlotMeter(studentVmsCount, studentLimit),
+          isAtLimit
+            ? button({
+                label: 'Request VM',
+                icon: 'send',
+                variant: 'primary',
+                onClick: () => openVmRequestModal({ onSuccess: loadRequests })
+              })
+            : button({
+                label: t('vm.new'),
+                icon: 'plus',
+                variant: 'primary',
+                href: '/vms/new'
+              })
+        )
+      })
     );
 
-    const header = pageHeader({
-      title: t('vm.title'),
-      description: t('vm.desc'),
-      actions: headerActions
-    });
+    const banner = dockerWarningBanner(vmState, { onRetry: () => refreshVms({ force: true }) });
+    bannerHost.replaceChildren(...(banner ? [banner] : []));
 
-    // Tab navigation (Virtual Machines vs Requests)
-    const tabsBar = h('div', { class: 'flex items-center gap-2 border-b border-line pb-2 mb-4 text-xs select-none' },
-      h('button', {
-        type: 'button',
-        class: cx(
-          'flex items-center gap-2 px-3 py-1.5 rounded-lg font-medium transition-colors cursor-pointer',
-          currentTab === 'vms' ? 'bg-raised text-fg font-semibold shadow-sm' : 'text-muted hover:text-fg hover:bg-surface'
+    tabsHost.replaceChildren(
+      h('div', { class: 'flex items-center gap-2 border-b border-line pb-2 text-xs select-none' },
+        h('button', {
+          type: 'button',
+          class: cx(
+            'flex items-center gap-2 px-3 py-1.5 rounded-lg font-medium transition-colors cursor-pointer',
+            currentTab === 'vms' ? 'bg-raised text-fg font-semibold shadow-sm' : 'text-muted hover:text-fg hover:bg-surface'
+          ),
+          onClick: () => { currentTab = 'vms'; drawAll(); }
+        },
+          icon('server', 'w-3.5 h-3.5'),
+          h('span', {}, `${t('nav.vms')} (${allVms.length})`)
         ),
-        onClick: () => { currentTab = 'vms'; renderHeaderAndContent(); draw(); }
-      },
-        icon('server', 'w-3.5 h-3.5'),
-        h('span', {}, `Mesin Virtual (${all.length})`)
-      ),
-      h('button', {
-        type: 'button',
-        class: cx(
-          'flex items-center gap-2 px-3 py-1.5 rounded-lg font-medium transition-colors cursor-pointer',
-          currentTab === 'requests' ? 'bg-raised text-fg font-semibold shadow-sm' : 'text-muted hover:text-fg hover:bg-surface'
-        ),
-        onClick: () => { currentTab = 'requests'; renderHeaderAndContent(); draw(); }
-      },
-        icon('clipboard-list', 'w-3.5 h-3.5'),
-        h('span', {}, `Permintaan (${requests.length})`),
-        pendingReqsCount > 0 && h('span', { class: 'rounded-full bg-[var(--warning-bg)] text-[var(--warning-text)] font-mono text-[10px] px-1.5 py-0.2 font-semibold' }, String(pendingReqsCount))
+        h('button', {
+          type: 'button',
+          class: cx(
+            'flex items-center gap-2 px-3 py-1.5 rounded-lg font-medium transition-colors cursor-pointer',
+            currentTab === 'requests' ? 'bg-raised text-fg font-semibold shadow-sm' : 'text-muted hover:text-fg hover:bg-surface'
+          ),
+          onClick: () => { currentTab = 'requests'; drawAll(); }
+        },
+          icon('clipboard-list', 'w-3.5 h-3.5'),
+          h('span', {}, `Requests (${requests.length})`),
+          pendingReqsCount > 0 && h('span', { class: 'rounded-full bg-[var(--warning-bg)] text-[var(--warning-text)] font-mono text-[10px] px-1.5 py-0.2 font-semibold' }, String(pendingReqsCount))
+        )
       )
     );
 
-    const controlsRow = currentTab === 'vms'
-      ? h('div', { class: 'mb-4 flex flex-wrap items-center gap-2' }, search, filter)
-      : null;
-
-    container.appendChild(header);
-    container.appendChild(tabsBar);
-    if (controlsRow) container.appendChild(controlsRow);
-    container.appendChild(host);
+    if (currentTab === 'vms') {
+      if (!controlsHost.firstChild) {
+        controlsHost.replaceChildren(h('div', { class: 'flex flex-wrap items-center gap-2' }, search, filter));
+      }
+    } else {
+      controlsHost.replaceChildren();
+    }
   }
 
-  onCleanup(on('vms:changed', () => load({ silent: true })));
-  onCleanup(on('requests:changed', () => load({ silent: true })));
-  load();
+  function drawTable() {
+    const vmState = getVmState();
+    const allVms = getVisibleVms();
+
+    if (vmState.loading && !vmState.initialized) {
+      host.replaceChildren(skeletonRows(4));
+      orphansHost.replaceChildren();
+      return;
+    }
+    if (vmState.error && !vmState.initialized) {
+      host.replaceChildren(errorState({ title: t('vm.error.title'), onRetry: () => refreshVms({ force: true }) }));
+      orphansHost.replaceChildren();
+      return;
+    }
+
+    if (currentTab === 'requests') {
+      host.replaceChildren(renderRequestsTab());
+      orphansHost.replaceChildren();
+      return;
+    }
+
+    if (!allVms.length) {
+      host.replaceChildren(emptyState({
+        icon: 'server',
+        title: t('vm.empty.title'),
+        description: t('vm.empty.desc'),
+        action: button({ label: t('vm.new'), icon: 'plus', variant: 'primary', href: '/vms/new' })
+      }));
+    } else {
+      const filtered = allVms.filter((vm) =>
+        (statusFilter === 'all' || vm.status === statusFilter) &&
+        (!query || vm.name.toLowerCase().includes(query) || (vm.ip || '').includes(query))
+      );
+
+      if (!filtered.length) {
+        host.replaceChildren(emptyState({
+          icon: 'search',
+          title: t('vm.empty.filtered'),
+          description: t('vm.empty.filteredDesc')
+        }));
+      } else {
+        const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+        if (page > totalPages) page = totalPages;
+        const pageRows = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+        const pager = totalPages > 1
+          ? h('div', { class: 'mt-3 flex items-center justify-between text-xs text-muted' },
+              h('span', {}, t('vm.page.info', { page, total: totalPages })),
+              h('div', { class: 'flex gap-2' },
+                button({ label: t('vm.page.prev'), size: 'xs', variant: 'secondary', disabled: page <= 1, onClick: () => { page--; drawTable(); } }),
+                button({ label: t('vm.page.next'), size: 'xs', variant: 'secondary', disabled: page >= totalPages, onClick: () => { page++; drawTable(); } })
+              )
+            )
+          : null;
+
+        host.replaceChildren(
+          h('div', {}, table({ columns: columns(showOwner, isAdmin), rows: pageRows, caption: t('vm.title') }), pager)
+        );
+      }
+    }
+
+    const orphanEl = isAdmin ? orphansSection(vmState.orphans) : null;
+    orphansHost.replaceChildren(...(orphanEl ? [orphanEl] : []));
+  }
+
+  function drawAll() {
+    const vmState = getVmState();
+    const allVms = getVisibleVms();
+    drawChrome(vmState, allVms);
+    drawTable();
+  }
+
+  async function loadRequests() {
+    requests = await api.vmRequests.list().catch(() => []);
+    drawAll();
+  }
+
+  onCleanup(subscribeVms(() => drawAll()));
+  onCleanup(on('requests:changed', () => loadRequests()));
+
+  drawAll();
+  void refreshVms({ force: false, silent: true });
+  void loadRequests();
 
   return PageContainer({ variant: 'default' }, container);
 }

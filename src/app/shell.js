@@ -1,13 +1,16 @@
 import { h } from '../lib/dom.js';
 import { Sidebar, closeMobileSidebar } from '../components/layout/sidebar.js';
 import { Topbar } from '../components/layout/topbar.js';
+import { initVmStore, subscribeVms } from '../lib/vm-store.js';
 
 /**
  * Main application layout shell with fixed sidebar + sticky topbar + scrollable content.
- * Built with pure CSS Grid and centralized container alignment.
+ * Subscribes to the shared VM store so sidebar badges & quota meters stay live in real time.
  */
 export function createAppLayout(root) {
   let shell = null;
+  let currentPath = '/dashboard';
+  let unsubscribeVms = null;
 
   const build = () => {
     const sidebarHost = h('div', { class: 'contents' });
@@ -32,9 +35,18 @@ export function createAppLayout(root) {
 
   return {
     show(node, { route, path }) {
+      currentPath = path;
       if (!shell) {
         shell = build();
         root.replaceChildren(shell.layout);
+      }
+      initVmStore();
+      if (!unsubscribeVms) {
+        unsubscribeVms = subscribeVms(() => {
+          if (shell) {
+            shell.sidebarHost.replaceChildren(Sidebar({ path: currentPath }));
+          }
+        });
       }
       closeMobileSidebar();
       shell.sidebarHost.replaceChildren(Sidebar({ path }));
@@ -42,6 +54,10 @@ export function createAppLayout(root) {
       shell.outlet.replaceChildren(h('div', { class: 'page-enter' }, node));
     },
     reset() {
+      if (unsubscribeVms) {
+        unsubscribeVms();
+        unsubscribeVms = null;
+      }
       shell = null;
     }
   };

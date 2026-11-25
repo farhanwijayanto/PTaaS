@@ -1,4 +1,7 @@
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import type { VmMetadataRecord, VmRuntimeStatus } from './docker-status';
 
 export type UserRole = 'admin' | 'instructor' | 'student';
 export type UserStatus = 'active' | 'pending' | 'suspended';
@@ -32,24 +35,21 @@ export interface StoredUser {
 
 export type PublicUser = Omit<StoredUser, 'passwordHash'>;
 
-export interface StoredVm {
-  id: string;
-  name: string;
-  os: 'kali' | 'parrot' | 'ubuntu';
-  vcpu: number;
-  ram: number;
-  disk: number;
-  ip: string;
-  vpc: string;
-  status: 'running' | 'stopped' | 'restarting' | 'creating';
+/** Demo-only simulated VM shape (only used when DEMO_MODE=true). */
+export interface DemoVm extends VmMetadataRecord {
+  status: VmRuntimeStatus;
   idleSeconds: number;
-  owner: string;
-  tenant: string;
-  rdpHost: string;
-  createdAt: string;
+  startedAt: string | null;
 }
 
 const DEFAULT_SEED_HASH = '165ef623ce7fa6810f3897eb609750e2be59aa19dbd403c45123ceac04859996';
+
+export function isServerDemoMode(): boolean {
+  if (process.env.DEMO_MODE === 'false' || process.env.NEXT_PUBLIC_DEMO_MODE === 'false') {
+    return false;
+  }
+  return true;
+}
 
 export function hashPassword(plain: string): string {
   return crypto.createHash('sha256').update(plain, 'utf8').digest('hex');
@@ -225,14 +225,20 @@ function createInitialUsers(): StoredUser[] {
   ];
 }
 
-function createInitialVms(): StoredVm[] {
+/**
+ * Demo seed VMs: ONLY loaded when DEMO_MODE=true.
+ * Real mode (DEMO_MODE=false) never seeds fake running VMs.
+ */
+function createDemoSeedVms(): DemoVm[] {
   const defaultHost = process.env.GUAC_DEFAULT_HOST || 'kali-lab-01';
   const now = new Date().toISOString();
+  const startedAt = new Date(Date.now() - 1000 * 60 * 18).toISOString();
   return [
     {
       id: 'vm-1',
       name: 'kali-lab-01',
       os: 'kali',
+      image: 'kasmweb/kali-rolling-desktop:1.15.0',
       vcpu: 2,
       ram: 4,
       disk: 30,
@@ -244,11 +250,33 @@ function createInitialVms(): StoredVm[] {
       tenant: 'CS-401',
       rdpHost: defaultHost,
       createdAt: now,
+      startedAt,
+      idleTimeoutMin: 60,
+    },
+    {
+      id: 'vm-2',
+      name: 'parrot-sec-01',
+      os: 'parrot',
+      image: 'parrotsec/security:latest',
+      vcpu: 2,
+      ram: 4,
+      disk: 30,
+      ip: '10.10.1.8',
+      vpc: 'vpc-cs401-01',
+      status: 'stopped',
+      idleSeconds: 3600,
+      owner: 'u-jdoe',
+      tenant: 'CS-401',
+      rdpHost: defaultHost,
+      createdAt: now,
+      startedAt: null,
+      idleTimeoutMin: 60,
     },
     {
       id: 'vm-3',
       name: 'kali-web-02',
       os: 'kali',
+      image: 'kasmweb/kali-rolling-desktop:1.15.0',
       vcpu: 2,
       ram: 4,
       disk: 30,
@@ -260,27 +288,33 @@ function createInitialVms(): StoredVm[] {
       tenant: 'CS-401',
       rdpHost: defaultHost,
       createdAt: now,
+      startedAt,
+      idleTimeoutMin: 60,
     },
     {
       id: 'vm-5',
       name: 'kali-docker-01',
       os: 'kali',
+      image: 'kasmweb/kali-rolling-desktop:1.15.0',
       vcpu: 2,
       ram: 4,
       disk: 30,
       ip: '10.10.1.15',
       vpc: 'vpc-cs401-02',
-      status: 'running',
-      idleSeconds: 980,
+      status: 'stopped',
+      idleSeconds: 3600,
       owner: 'u-jsmith',
       tenant: 'CS-401',
       rdpHost: defaultHost,
       createdAt: now,
+      startedAt: null,
+      idleTimeoutMin: 60,
     },
     {
       id: 'vm-9',
       name: 'kali-ctf-01',
       os: 'kali',
+      image: 'kasmweb/kali-rolling-desktop:1.15.0',
       vcpu: 2,
       ram: 4,
       disk: 30,
@@ -292,11 +326,14 @@ function createInitialVms(): StoredVm[] {
       tenant: 'CS-401',
       rdpHost: defaultHost,
       createdAt: now,
+      startedAt,
+      idleTimeoutMin: 60,
     },
     {
       id: 'vm-10',
       name: 'kali-wifi-01',
       os: 'kali',
+      image: 'kasmweb/kali-rolling-desktop:1.15.0',
       vcpu: 2,
       ram: 4,
       disk: 30,
@@ -308,25 +345,172 @@ function createInitialVms(): StoredVm[] {
       tenant: 'CS-401',
       rdpHost: defaultHost,
       createdAt: now,
+      startedAt,
+      idleTimeoutMin: 60,
     },
   ];
 }
 
+function getVmStoreFilePath(): string | null {
+  if (isServerDemoMode()) return null;
+  if (process.env.PTAAS_VM_STORE_PATH === 'memory') return null;
+  return process.env.PTAAS_VM_STORE_PATH || path.join(process.cwd(), '.data', 'vms.json');
+}
+
+function loadRealVmRecordsFromDisk(): VmMetadataRecord[] {
+  const filePath = getVmStoreFilePath();
+  if (!filePath) return [];
+  try {
+    if (!fs.existsSync(filePath)) return [];
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    // Strip any legacy runtime status field if present on disk
+    return parsed.map((item) => {
+      const {
+        status: _s,
+        idleSeconds: _i,
+        startedAt: _st,
+        ...meta
+      } = item as Record<string, unknown>;
+      void _s;
+      void _i;
+      void _st;
+      return meta as unknown as VmMetadataRecord;
+    });
+  } catch {
+    return [];
+  }
+}
+
+function persistRealVmRecordsToDisk(records: VmMetadataRecord[]): void {
+  const filePath = getVmStoreFilePath();
+  if (!filePath) return;
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    // Store metadata only, never runtime status
+    fs.writeFileSync(filePath, JSON.stringify(records, null, 2), 'utf8');
+  } catch {
+    // Ignore disk write errors in read-only environments
+  }
+}
+
+export interface SystemPolicies {
+  maxSelfServiceVms: number;
+  hardCapVms: number;
+  grantValidityDays: number;
+  autoProvisionOnApproval: boolean;
+  maxTotalVms: number;
+  maxRunningVms: number;
+  maxConcurrentCreations: number;
+  hostMemoryReserveMb: number;
+  hostDiskReserveGb: number;
+}
+
+export interface ServerAuditEntry {
+  id: string;
+  time: string;
+  action: string;
+  actor: string;
+  tenant: string;
+  target: string;
+  image?: string;
+  spec?: string;
+  result: 'SUCCESS' | 'FAILED' | 'BLOCKED';
+  detail?: string;
+}
+
 interface ServerStore {
   users: StoredUser[];
-  vms: StoredVm[];
+  /** Authoritative metadata-only VM records for real mode (never holds runtime status). */
+  vmRecords: VmMetadataRecord[];
+  /** Demo-mode simulated VMs (strictly isolated to DEMO_MODE=true). */
+  demoVms: DemoVm[];
+  policies: SystemPolicies;
+  audit: ServerAuditEntry[];
 }
 
 const globalForStore = globalThis as unknown as { __ptaasServerStore?: ServerStore };
+
+function createDefaultPolicies(): SystemPolicies {
+  return {
+    maxSelfServiceVms: Number.parseInt(process.env.MAX_SELF_SERVICE_VMS || '3', 10) || 3,
+    hardCapVms: Number.parseInt(process.env.HARD_CAP_VMS || '6', 10) || 6,
+    grantValidityDays: 7,
+    autoProvisionOnApproval: true,
+    maxTotalVms: Number.parseInt(process.env.MAX_TOTAL_VMS || '40', 10) || 40,
+    maxRunningVms: Number.parseInt(process.env.MAX_RUNNING_VMS || '20', 10) || 20,
+    maxConcurrentCreations: Number.parseInt(process.env.MAX_CONCURRENT_CREATIONS || '2', 10) || 2,
+    hostMemoryReserveMb: Number.parseInt(process.env.HOST_MEMORY_RESERVE_MB || '512', 10) || 512,
+    hostDiskReserveGb: Number.parseInt(process.env.HOST_DISK_RESERVE_GB || '2', 10) || 2,
+  };
+}
 
 function getStore(): ServerStore {
   if (!globalForStore.__ptaasServerStore) {
     globalForStore.__ptaasServerStore = {
       users: createInitialUsers(),
-      vms: createInitialVms(),
+      vmRecords: loadRealVmRecordsFromDisk(),
+      demoVms: createDemoSeedVms(),
+      policies: createDefaultPolicies(),
+      audit: [],
     };
   }
   return globalForStore.__ptaasServerStore;
+}
+
+export function getSystemPolicies(): SystemPolicies {
+  return { ...getStore().policies };
+}
+
+export function updateSystemPolicies(updates: Partial<SystemPolicies>): SystemPolicies {
+  const p = getStore().policies;
+  if (typeof updates.maxSelfServiceVms === 'number' && updates.maxSelfServiceVms >= 1) {
+    p.maxSelfServiceVms = Math.min(20, Math.round(updates.maxSelfServiceVms));
+  }
+  if (typeof updates.hardCapVms === 'number' && updates.hardCapVms >= 1) {
+    p.hardCapVms = Math.min(50, Math.round(updates.hardCapVms));
+  }
+  if (typeof updates.grantValidityDays === 'number' && updates.grantValidityDays >= 1) {
+    p.grantValidityDays = Math.min(90, Math.round(updates.grantValidityDays));
+  }
+  if (typeof updates.autoProvisionOnApproval === 'boolean') {
+    p.autoProvisionOnApproval = updates.autoProvisionOnApproval;
+  }
+  if (typeof updates.maxTotalVms === 'number' && updates.maxTotalVms >= 1) {
+    p.maxTotalVms = Math.min(500, Math.round(updates.maxTotalVms));
+  }
+  if (typeof updates.maxRunningVms === 'number' && updates.maxRunningVms >= 1) {
+    p.maxRunningVms = Math.min(500, Math.round(updates.maxRunningVms));
+  }
+  if (typeof updates.maxConcurrentCreations === 'number' && updates.maxConcurrentCreations >= 1) {
+    p.maxConcurrentCreations = Math.min(10, Math.round(updates.maxConcurrentCreations));
+  }
+  if (typeof updates.hostMemoryReserveMb === 'number' && updates.hostMemoryReserveMb >= 0) {
+    p.hostMemoryReserveMb = Math.round(updates.hostMemoryReserveMb);
+  }
+  if (typeof updates.hostDiskReserveGb === 'number' && updates.hostDiskReserveGb >= 0) {
+    p.hostDiskReserveGb = Math.round(updates.hostDiskReserveGb);
+  }
+  return { ...p };
+}
+
+export function recordServerAudit(
+  entry: Omit<ServerAuditEntry, 'id' | 'time'>
+): ServerAuditEntry {
+  const full: ServerAuditEntry = {
+    id: `aud-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+    time: new Date().toISOString(),
+    ...entry,
+  };
+  const audit = getStore().audit;
+  audit.unshift(full);
+  if (audit.length > 500) audit.pop();
+  return full;
+}
+
+export function listServerAudit(limit = 100): ServerAuditEntry[] {
+  return getStore().audit.slice(0, limit);
 }
 
 export function listAllUsers(): StoredUser[] {
@@ -468,20 +652,43 @@ export function deleteStoredUser(id: string): boolean {
   return true;
 }
 
-export function listAllVms(): StoredVm[] {
-  return getStore().vms;
+// --- Real-mode VM Metadata Store (NO runtime status persisted) ---
+
+export function listVmRecords(): VmMetadataRecord[] {
+  return getStore().vmRecords;
 }
 
-export function findVmByIdOrName(idOrName: string): StoredVm | undefined {
+export function reloadVmRecordsFromDisk(): VmMetadataRecord[] {
+  const store = getStore();
+  store.vmRecords = loadRealVmRecordsFromDisk();
+  return store.vmRecords;
+}
+
+export function findVmRecordById(id: string): VmMetadataRecord | undefined {
+  return getStore().vmRecords.find((v) => v.id === id);
+}
+
+export function findVmRecordByIdOrName(idOrName: string): VmMetadataRecord | undefined {
   const needle = idOrName.trim().toLowerCase();
-  return getStore().vms.find(
+  if (isServerDemoMode()) {
+    return getStore().demoVms.find(
+      (v) => v.id.toLowerCase() === needle || v.name.toLowerCase() === needle
+    );
+  }
+  return getStore().vmRecords.find(
     (v) => v.id.toLowerCase() === needle || v.name.toLowerCase() === needle
   );
 }
 
-export function createStoredVm(input: {
+export function createVmMetadataRecord(input: {
+  id?: string;
   name: string;
-  os: 'kali';
+  os?: 'kali' | 'parrot' | 'ubuntu';
+  catalogId?: string;
+  image: string;
+  containerName: string;
+  volumeName: string;
+  networkName: string;
   vcpu: number;
   ram: number;
   disk: number;
@@ -489,7 +696,92 @@ export function createStoredVm(input: {
   owner: string;
   tenant: string;
   rdpHost?: string;
-}): StoredVm {
+  rdpPort?: number;
+  sshPort?: number;
+  vncPort?: number;
+  protocol?: string;
+  idleTimeoutMin?: number;
+  restartPolicy?: string;
+  passwordEnc?: string;
+}): VmMetadataRecord {
+  const store = getStore();
+  const safeName =
+    input.name
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '') || `kali-lab-${crypto.randomBytes(3).toString('hex')}`;
+
+  const id = input.id || crypto.randomUUID();
+
+  const record: VmMetadataRecord = {
+    id,
+    name: safeName,
+    os: input.os || 'kali',
+    catalogId: input.catalogId || 'kali-2024.3',
+    image: input.image,
+    containerName: input.containerName,
+    volumeName: input.volumeName,
+    networkName: input.networkName,
+    vcpu: Math.min(8, Math.max(1, Number(input.vcpu) || 2)),
+    ram: Math.min(16, Math.max(1, Number(input.ram) || 4)),
+    disk: Math.min(100, Math.max(20, Number(input.disk) || 30)),
+    ip: '',
+    vpc: input.vpc || input.networkName,
+    owner: input.owner,
+    tenant: input.tenant || 'CS-401',
+    rdpHost: input.rdpHost || input.containerName,
+    rdpPort: input.rdpPort ?? 3389,
+    sshPort: input.sshPort ?? 2222,
+    vncPort: input.vncPort ?? 5901,
+    protocol: input.protocol || 'rdp',
+    createdAt: new Date().toISOString(),
+    idleTimeoutMin: input.idleTimeoutMin ?? findUserById(input.owner)?.idleTimeoutMin ?? 60,
+    restartPolicy: input.restartPolicy || 'unless-stopped',
+    passwordEnc: input.passwordEnc,
+  };
+
+  store.vmRecords.push(record);
+  persistRealVmRecordsToDisk(store.vmRecords);
+  return record;
+}
+
+export function updateVmMetadataIp(id: string, ip: string): void {
+  const store = getStore();
+  const rec = store.vmRecords.find((v) => v.id === id);
+  if (!rec || !ip) return;
+  rec.ip = ip;
+  rec.rdpHost = ip;
+  persistRealVmRecordsToDisk(store.vmRecords);
+}
+
+export function deleteVmMetadataRecord(id: string): boolean {
+  const store = getStore();
+  const idx = store.vmRecords.findIndex((v) => v.id === id);
+  if (idx === -1) return false;
+  store.vmRecords.splice(idx, 1);
+  persistRealVmRecordsToDisk(store.vmRecords);
+  return true;
+}
+
+// --- Demo-mode VM Store (strictly DEMO_MODE=true) ---
+
+export function listDemoVms(): DemoVm[] {
+  return getStore().demoVms;
+}
+
+export function createDemoVm(input: {
+  name: string;
+  os?: 'kali' | 'parrot' | 'ubuntu';
+  vcpu: number;
+  ram: number;
+  disk: number;
+  vpc?: string;
+  owner: string;
+  tenant: string;
+  rdpHost?: string;
+}): DemoVm {
   const store = getStore();
   const safeName =
     input.name
@@ -499,26 +791,34 @@ export function createStoredVm(input: {
       .replace(/-+/g, '-')
       .replace(/^-|-$/g, '') || `kali-lab-${Date.now().toString().slice(-4)}`;
 
-  const defaultHost = process.env.GUAC_DEFAULT_HOST || 'kali-lab-01';
-  const multiHost = process.env.GUAC_MULTI_HOST === 'true';
-
-  const newVm: StoredVm = {
+  const now = new Date().toISOString();
+  const vm: DemoVm = {
     id: `vm-${Date.now()}`,
     name: safeName,
-    os: 'kali',
+    os: input.os || 'kali',
+    image: 'kasmweb/kali-rolling-desktop:1.15.0',
     vcpu: Math.min(8, Math.max(1, Number(input.vcpu) || 2)),
     ram: Math.min(16, Math.max(2, Number(input.ram) || 4)),
     disk: Math.min(100, Math.max(20, Number(input.disk) || 30)),
-    ip: `10.10.1.${40 + store.vms.length}`,
+    ip: `10.10.1.${40 + store.demoVms.length}`,
     vpc: input.vpc || 'vpc-cs401-01',
     status: 'running',
     idleSeconds: 3600,
     owner: input.owner,
     tenant: input.tenant || 'CS-401',
-    rdpHost: input.rdpHost || (multiHost ? safeName : defaultHost),
-    createdAt: new Date().toISOString(),
+    rdpHost: input.rdpHost || process.env.GUAC_DEFAULT_HOST || 'kali-lab-01',
+    createdAt: now,
+    startedAt: now,
+    idleTimeoutMin: 60,
   };
+  store.demoVms.push(vm);
+  return vm;
+}
 
-  store.vms.push(newVm);
-  return newVm;
+export function deleteDemoVm(id: string): boolean {
+  const store = getStore();
+  const idx = store.demoVms.findIndex((v) => v.id === id);
+  if (idx === -1) return false;
+  store.demoVms.splice(idx, 1);
+  return true;
 }

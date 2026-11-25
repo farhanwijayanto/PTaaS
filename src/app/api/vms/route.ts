@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSessionFromRequest } from '@/lib/server-auth';
-import { createStoredVm, findUserById, listAllVms } from '@/lib/server-store';
+import { DockerApiError, getVmStatusService } from '@/lib/vm-status-service';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,16 +10,15 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const all = listAllVms();
-  const actor = findUserById(session.userId);
-  let visible = all;
-  if (session.role === 'student') {
-    visible = all.filter((v) => v.owner === session.userId);
-  } else if (session.role === 'instructor' && actor) {
-    visible = all.filter((v) => actor.cohorts.includes(v.tenant));
-  }
+  const url = new URL(req.url);
+  const forceRefresh = url.searchParams.get('refresh') === 'true';
 
-  return NextResponse.json({ vms: visible });
+  const service = getVmStatusService();
+  const snapshot = await service.getScopedSnapshot(session, forceRefresh);
+
+  return NextResponse.json(snapshot, {
+    headers: { 'Cache-Control': 'no-store' },
+  });
 }
 
 export async function POST(req: Request) {
@@ -31,77 +30,68 @@ export async function POST(req: Request) {
   try {
     const body = (await req.json()) as {
       name?: string;
+      imageId?: string;
       os?: string;
       vcpu?: number;
       ram?: number;
       disk?: number;
       vpc?: string;
       cohort?: string;
+      grantId?: string;
+      idempotencyKey?: string;
+      restartPolicy?: string;
+      waitForReady?: boolean;
     };
 
-    const requestedOs = (body.os || 'kali').toLowerCase();
-    if (requestedOs !== 'kali') {
+    // Never accept free-form image references or URLs from the client; only allow-listed catalog IDs
+    if ('image' in (body as Record<string, unknown>)) {
       return NextResponse.json(
-        { error: 'Saat ini hanya image Kali Linux yang tersedia untuk pembuatan VM baru.' },
+        { error: 'Free-form image names are not allowed. Use an allow-listed imageId from the catalog.', code: 'invalid_image' },
         { status: 400 }
       );
     }
 
-    const all = listAllVms();
-    const actor = findUserById(session.userId);
-    const limit = actor?.maxSelfServiceVms || 3;
-    const ownedCount = all.filter((v) => v.owner === session.userId).length;
-    if (session.role === 'student' && ownedCount >= limit) {
-      return NextResponse.json(
-        { error: `Maximum self-service VM limit (${limit}) reached.`, code: 'vm_limit_reached' },
-        { status: 403 }
-      );
-    }
-
-    let provisionedHost: string | undefined;
-    // Optional hook for real Docker container creation on b1-6 when PROVISIONER_API_URL is set
-    if (process.env.PROVISIONER_API_URL) {
-      const provRes = await fetch(`${process.env.PROVISIONER_API_URL.replace(/\/+$/, '')}/vms`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(process.env.PROVISIONER_API_KEY
-            ? { Authorization: `Bearer ${process.env.PROVISIONER_API_KEY}` }
-            : {}),
-        },
-        body: JSON.stringify({
-          name: body.name,
-          os: 'kali',
-          vcpu: body.vcpu || 2,
-          ram: body.ram || 4,
-          owner: session.userId,
-        }),
-      });
-      if (!provRes.ok) {
-        const text = await provRes.text().catch(() => 'Provisioner failed');
-        return NextResponse.json({ error: `Provisioner error: ${text}` }, { status: 502 });
-      }
-      const provData = (await provRes.json().catch(() => ({}))) as { hostname?: string };
-      provisionedHost = provData.hostname;
-    }
-
-    const vm = createStoredVm({
-      name: body.name || `kali-lab-${Date.now().toString().slice(-4)}`,
-      os: 'kali',
-      vcpu: Number(body.vcpu) || 2,
-      ram: Number(body.ram) || 4,
-      disk: Number(body.disk) || 30,
-      vpc: body.vpc || 'vpc-cs401-01',
-      owner: session.userId,
-      tenant: body.cohort || session.cohort || 'CS-401',
-      rdpHost: provisionedHost,
+    const headerIdemp = req.headers.get('idempotency-key') || undefined;
+    const service = getVmStatusService();
+    const vm = await service.createVm(session, {
+      name: body.name,
+      imageId: body.imageId,
+      os: body.os,
+      vcpu: body.vcpu,
+      ram: body.ram,
+      disk: body.disk,
+      vpc: body.vpc,
+      cohort: body.cohort,
+      grantId: body.grantId,
+      idempotencyKey: headerIdemp || body.idempotencyKey,
+      restartPolicy: body.restartPolicy === 'no' ? 'no' : 'unless-stopped',
+      waitForReady: Boolean(body.waitForReady),
     });
 
-    return NextResponse.json({ vm }, { status: 201 });
-  } catch (err) {
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : 'Failed to create VM' },
-      { status: 400 }
+      {
+        vm,
+        statusSource: vm.statusSource,
+        statusUpdatedAt: vm.statusUpdatedAt,
+        stale: vm.stale,
+      },
+      { status: 201 }
+    );
+  } catch (err) {
+    const e = err as Error & { code?: string; statusCode?: number };
+    const status =
+      e instanceof DockerApiError
+        ? e.statusCode >= 400 && e.statusCode < 600
+          ? e.statusCode
+          : 502
+        : e.statusCode || 400;
+
+    return NextResponse.json(
+      {
+        error: e?.message || 'Failed to create VM',
+        ...(e?.code ? { code: e.code } : {}),
+      },
+      { status }
     );
   }
 }

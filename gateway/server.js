@@ -7,6 +7,7 @@ const net = require('net');
 const os = require('os');
 const ssh2 = require('ssh2');
 const { createVmSshServer } = require('./server/vm-ssh-daemon');
+const { GatewayDockerProvider } = require('./server/docker-provider');
 const {
   makeError,
   generateRequestId,
@@ -49,6 +50,8 @@ const MIME = {
   '.woff2': 'font/woff2'
 };
 
+const IS_DEMO_MODE = !(process.env.DEMO_MODE === 'false' || process.env.DESKTOP_BACKEND === 'docker');
+
 // System Policies for Student VM Quota & Requests (Part B)
 const systemPolicies = {
   maxSelfServiceVms: 3,
@@ -57,30 +60,97 @@ const systemPolicies = {
   autoProvisionOnApproval: true
 };
 
-// In-memory VM status tracking (simulated libvirt / container manager)
-const vmRegistry = {
-  // John Doe (u-jdoe) - 2 VMs (1 slot free)
-  'vm-1': { id: 'vm-1', name: 'kali-lab-01', os: 'kali', status: 'running', ip: '10.10.1.5', protocol: 'rdp', vncPort: 5901, rdpPort: 3389, sshPort: 2222, tenant: 'CS-401', owner: 'u-jdoe' },
-  'vm-2': { id: 'vm-2', name: 'parrot-sec-01', os: 'parrot', status: 'running', ip: '10.10.1.8', protocol: 'rdp', vncPort: 5902, rdpPort: 3390, sshPort: 2222, tenant: 'CS-401', owner: 'u-jdoe' },
-
-  // Jane Smith (u-jsmith) - 3 VMs (limit reached, 1 pending request)
-  'vm-3': { id: 'vm-3', name: 'kali-web-02', os: 'kali', status: 'running', ip: '10.10.1.12', protocol: 'rdp', vncPort: 5903, rdpPort: 3391, sshPort: 2222, tenant: 'CS-401', owner: 'u-jsmith' },
-  'vm-5': { id: 'vm-5', name: 'kali-docker-01', os: 'kali', status: 'running', ip: '10.10.1.15', protocol: 'rdp', vncPort: 5905, rdpPort: 3393, sshPort: 2222, tenant: 'CS-401', owner: 'u-jsmith' },
-  'vm-6': { id: 'vm-6', name: 'ubuntu-test-01', os: 'ubuntu', status: 'stopped', ip: '10.10.1.16', protocol: 'rdp', vncPort: 5906, rdpPort: 3394, sshPort: 2223, tenant: 'CS-401', owner: 'u-jsmith' },
-
-  // Emily Davis (u-edavis) - 3 VMs (limit reached, 1 rejected request)
-  'vm-7': { id: 'vm-7', name: 'parrot-lab-02', os: 'parrot', status: 'running', ip: '10.10.1.21', protocol: 'rdp', vncPort: 5907, rdpPort: 3395, sshPort: 2222, tenant: 'CS-401', owner: 'u-edavis' },
-  'vm-8': { id: 'vm-8', name: 'ubuntu-sec-01', os: 'ubuntu', status: 'stopped', ip: '10.10.1.22', protocol: 'rdp', vncPort: 5908, rdpPort: 3396, sshPort: 2223, tenant: 'CS-401', owner: 'u-edavis' },
-  'vm-9': { id: 'vm-9', name: 'kali-ctf-01', os: 'kali', status: 'running', ip: '10.10.1.23', protocol: 'rdp', vncPort: 5909, rdpPort: 3397, sshPort: 2222, tenant: 'CS-401', owner: 'u-edavis' },
-
-  // Michael Wilson (u-mwilson) - 3 VMs (limit reached, 1 approved unused grant)
-  'vm-10': { id: 'vm-10', name: 'kali-wifi-01', os: 'kali', status: 'running', ip: '10.10.1.31', protocol: 'rdp', vncPort: 5910, rdpPort: 3398, sshPort: 2222, tenant: 'CS-401', owner: 'u-mwilson' },
-  'vm-11': { id: 'vm-11', name: 'ubuntu-audit-01', os: 'ubuntu', status: 'stopped', ip: '10.10.1.32', protocol: 'rdp', vncPort: 5911, rdpPort: 3399, sshPort: 2223, tenant: 'CS-401', owner: 'u-mwilson' },
-  'vm-12': { id: 'vm-12', name: 'parrot-recon-01', os: 'parrot', status: 'running', ip: '10.10.1.33', protocol: 'rdp', vncPort: 5912, rdpPort: 3400, sshPort: 2222, tenant: 'CS-401', owner: 'u-mwilson' },
-
-  // Other cohorts
-  'vm-4': { id: 'vm-4', name: 'ubuntu-dev-01', os: 'ubuntu', status: 'stopped', ip: '10.10.3.10', protocol: 'rdp', vncPort: 5904, rdpPort: 3392, sshPort: 2223, tenant: 'SEC-301', owner: 'u-lharris' }
+// Demo-only simulated VM registry (strictly isolated behind DEMO_MODE=true).
+// In real mode (DEMO_MODE=false), vmRegistry stores metadata ONLY — never a runtime `status` flag.
+const DEMO_SEED_VMS = {
+  'vm-1': { id: 'vm-1', name: 'kali-lab-01', os: 'kali', status: 'running', vcpu: 2, ram: 4, disk: 30, ip: '10.10.1.5', protocol: 'rdp', vncPort: 5901, rdpPort: 3389, sshPort: 2222, tenant: 'CS-401', owner: 'u-jdoe' },
+  'vm-2': { id: 'vm-2', name: 'parrot-sec-01', os: 'parrot', status: 'stopped', vcpu: 2, ram: 4, disk: 30, ip: '10.10.1.8', protocol: 'rdp', vncPort: 5902, rdpPort: 3390, sshPort: 2222, tenant: 'CS-401', owner: 'u-jdoe' },
+  'vm-3': { id: 'vm-3', name: 'kali-web-02', os: 'kali', status: 'running', vcpu: 2, ram: 4, disk: 30, ip: '10.10.1.12', protocol: 'rdp', vncPort: 5903, rdpPort: 3391, sshPort: 2222, tenant: 'CS-401', owner: 'u-jsmith' },
+  'vm-4': { id: 'vm-4', name: 'ubuntu-dev-01', os: 'ubuntu', status: 'stopped', vcpu: 1, ram: 2, disk: 20, ip: '10.10.3.10', protocol: 'rdp', vncPort: 5904, rdpPort: 3392, sshPort: 2223, tenant: 'SEC-301', owner: 'u-lharris' }
 };
+
+const vmRegistry = IS_DEMO_MODE
+  ? JSON.parse(JSON.stringify(DEMO_SEED_VMS))
+  : {};
+
+const dockerProvider = IS_DEMO_MODE ? null : new GatewayDockerProvider();
+const vmSecrets = new Map(); // vmId -> strong random password (in-memory only, never exposed in API/logs)
+const sseClients = new Set();
+const openVmSockets = new Map(); // vmId -> Set<{ socket, sendWs, kind }>
+
+function registerVmSocket(vmId, entry) {
+  if (!openVmSockets.has(vmId)) openVmSockets.set(vmId, new Set());
+  openVmSockets.get(vmId).add(entry);
+  return () => {
+    openVmSockets.get(vmId)?.delete(entry);
+  };
+}
+
+function invalidateVmSessions(vmId, reason = 'VM stopped') {
+  for (const [token, info] of activeSessions.entries()) {
+    if (info.vmId === vmId) activeSessions.delete(token);
+  }
+  const sockets = openVmSockets.get(vmId);
+  if (sockets) {
+    for (const entry of sockets) {
+      try {
+        if (entry.kind === 'terminal') {
+          entry.sendWs(`\r\n\x1b[1;31m[${reason}]\x1b[0m\r\n`);
+        } else {
+          const msg = `${reason}.`;
+          entry.sendWs(`10.error,${msg.length}.${msg},3.514;`);
+        }
+        setTimeout(() => { try { entry.socket.destroy(); } catch {} }, 150);
+      } catch {}
+    }
+    sockets.clear();
+  }
+  broadcastSse('session_invalidated', { vmId, reason, at: new Date().toISOString() });
+}
+
+function getDerivedSnapshot() {
+  if (IS_DEMO_MODE) {
+    return {
+      vms: Object.values(vmRegistry).map((v) => ({
+        ...v,
+        statusSource: 'demo',
+        statusUpdatedAt: new Date().toISOString(),
+        stale: false
+      })),
+      orphans: [],
+      statusUpdatedAt: new Date().toISOString(),
+      statusSource: 'demo',
+      stale: false,
+      dockerReachable: true,
+      demoMode: true
+    };
+  }
+  return {
+    ...dockerProvider.reconcileRecords(Object.values(vmRegistry)),
+    demoMode: false
+  };
+}
+
+function getDerivedVm(vmId) {
+  const snap = getDerivedSnapshot();
+  return snap.vms.find((v) => v.id === vmId) || null;
+}
+
+function broadcastSse(eventName, payload) {
+  const frame = `event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`;
+  for (const res of sseClients) {
+    try { res.write(frame); } catch { sseClients.delete(res); }
+  }
+}
+
+if (dockerProvider) {
+  dockerProvider.start();
+  dockerProvider.on('reconciled', () => broadcastSse('snapshot', getDerivedSnapshot()));
+  dockerProvider.on('unreachable', () => broadcastSse('snapshot', getDerivedSnapshot()));
+  dockerProvider.on('container_stopped', ({ vmId, reason }) => {
+    if (vmId) invalidateVmSessions(vmId, reason || 'VM stopped');
+  });
+}
 
 // Seed VM Requests State Machine (Part B)
 const vmRequests = [
@@ -149,10 +219,9 @@ const activeCreationLocks = new Set();
 // Per-student VM quota overrides (admin/instructor managed)
 const userVmLimits = new Map();
 
-// Helper to count non-deleted active VMs for a student
+// Helper to count non-deleted VMs for a student (metadata count, never relies on stored status)
 function getStudentActiveVmCount(studentId) {
-  const activeStatuses = ['creating', 'running', 'stopped', 'error', 'restarting'];
-  return Object.values(vmRegistry).filter(vm => vm.owner === studentId && activeStatuses.includes(vm.status)).length;
+  return Object.values(vmRegistry).filter(vm => vm.owner === studentId).length;
 }
 
 function getStudentLimit(studentId) {
@@ -351,11 +420,31 @@ const server = http.createServer((req, res) => {
   }
 
   // --- REST API ENDPOINTS ---
+  // GET /api/vms/events - Server-Sent Events live status stream
+  if (pathname === '/api/vms/events' && req.method === 'GET') {
+    applySecurityHeaders(res, false);
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive'
+    });
+    sseClients.add(res);
+    res.write(`event: snapshot\ndata: ${JSON.stringify(getDerivedSnapshot())}\n\n`);
+    const hb = setInterval(() => {
+      try { res.write(`: heartbeat ${Date.now()}\n\n`); } catch { clearInterval(hb); sseClients.delete(res); }
+    }, 20000);
+    req.on('close', () => {
+      clearInterval(hb);
+      sseClients.delete(res);
+    });
+    return;
+  }
+
   // POST /api/vms/:id/desktop-session
   const sessionMatch = pathname.match(/^\/api\/vms\/([^/]+)\/desktop-session$/);
   if (sessionMatch) {
     const vmId = sessionMatch[1];
-    const vm = vmRegistry[vmId];
+    const vm = getDerivedVm(vmId);
 
     if (req.method === 'POST') {
       if (!vm) {
@@ -363,14 +452,10 @@ const server = http.createServer((req, res) => {
         return sendJson(res, 404, { error: 'vm_not_found', message: 'Virtual machine not found' });
       }
 
-      // 1. VM State checks
-      if (vm.status === 'stopped') {
-        recordAudit('desktop.session.denied', vm.name, 'student', 'VM is stopped');
-        return sendJson(res, 409, { error: 'vm_stopped', message: 'VM is currently stopped. Start VM to access desktop.' });
-      }
-      if (vm.status === 'booting') {
-        recordAudit('desktop.session.denied', vm.name, 'student', 'VM is still booting');
-        return sendJson(res, 409, { error: 'vm_booting', message: 'VM is still booting. Please wait.' });
+      // 1. VM State checks (derived from Docker)
+      if (vm.status !== 'running') {
+        recordAudit('desktop.session.denied', vm.name, 'student', `VM status is ${vm.status}`);
+        return sendJson(res, 409, { error: 'vm_not_running', status: vm.status, message: `VM is currently ${vm.status}. Start VM to access desktop.` });
       }
 
       // 2. Generate signed single-use token (valid for 120s)
@@ -408,20 +493,16 @@ const server = http.createServer((req, res) => {
   const termSessionMatch = pathname.match(/^\/api\/vms\/([^/]+)\/terminal-session$/);
   if (termSessionMatch) {
     const vmId = termSessionMatch[1];
-    const vm = vmRegistry[vmId];
+    const vm = getDerivedVm(vmId);
 
     if (req.method === 'POST') {
       if (!vm) {
         recordAudit('terminal.session.denied', vmId, 'unknown', 'VM does not exist');
         return sendJson(res, 404, { error: 'vm_not_found', message: 'Virtual machine not found' });
       }
-      if (vm.status === 'stopped') {
-        recordAudit('terminal.session.denied', vm.name, 'student', 'VM is stopped');
-        return sendJson(res, 409, { error: 'vm_stopped', message: 'VM is currently stopped. Start VM to access terminal.' });
-      }
-      if (vm.status === 'booting') {
-        recordAudit('terminal.session.denied', vm.name, 'student', 'VM is still booting');
-        return sendJson(res, 409, { error: 'vm_booting', message: 'VM is still booting. Please wait.' });
+      if (vm.status !== 'running') {
+        recordAudit('terminal.session.denied', vm.name, 'student', `VM status is ${vm.status}`);
+        return sendJson(res, 409, { error: 'vm_not_running', status: vm.status, message: `VM is currently ${vm.status}. Start VM to access terminal.` });
       }
 
       // Generate signed token for terminal session (valid for 60s)
@@ -457,40 +538,108 @@ const server = http.createServer((req, res) => {
   const healthMatch = pathname.match(/^\/api\/vms\/([^/]+)\/health$/);
   if (healthMatch && req.method === 'GET') {
     const vmId = healthMatch[1];
-    const vm = vmRegistry[vmId];
+    const vm = getDerivedVm(vmId);
     if (!vm) return sendJson(res, 404, { error: 'not_found' });
 
     return sendJson(res, 200, {
       status: vm.status,
-      cpuUsage: vm.status === 'running' ? +(12 + Math.random() * 5).toFixed(1) : 0,
-      memoryUsedMb: vm.status === 'running' ? 2140 : 0,
-      memoryTotalMb: 4096,
-      uptimeSeconds: vm.status === 'running' ? 3420 : 0,
-      latencyMs: vm.status === 'running' ? 18 : 0,
+      statusSource: vm.statusSource,
+      statusUpdatedAt: vm.statusUpdatedAt,
+      stale: vm.stale,
+      uptimeSeconds: vm.status === 'running' ? (vm.uptimeSeconds || 0) : 0,
       protocol: vm.protocol || 'rdp',
       resolution: '1920x1080',
       desktopReady: vm.status === 'running'
     });
   }
 
-  // POST /api/vms/:id/start
-  const startMatch = pathname.match(/^\/api\/vms\/([^/]+)\/start$/);
-  if (startMatch && req.method === 'POST') {
-    const vmId = startMatch[1];
-    const vm = vmRegistry[vmId];
-    if (vm) {
-      vm.status = 'running';
-      recordAudit('vm.start', vm.name, 'student', 'Started via desktop viewer');
-      return sendJson(res, 200, { success: true, status: 'running' });
-    }
+  // POST /api/vms/:id/(start|stop|restart|action)
+  const lifecycleMatch = pathname.match(/^\/api\/vms\/([^/]+)\/(start|stop|restart|action)$/);
+  if (lifecycleMatch && req.method === 'POST') {
+    const vmId = lifecycleMatch[1];
+    const routeAction = lifecycleMatch[2];
+    return readJsonBody(req, res, async (err, body) => {
+      const action = routeAction === 'action' ? String(body?.action || '').toLowerCase() : routeAction;
+      const meta = vmRegistry[vmId];
+      if (!meta) return sendJson(res, 404, makeError('not_found', 'VM not found'));
+
+      if (IS_DEMO_MODE) {
+        if (action === 'start' || action === 'restart' || action === 'recreate') meta.status = 'running';
+        else if (action === 'stop') { meta.status = 'stopped'; invalidateVmSessions(vmId, 'VM stopped'); }
+        else if (action === 'delete') { delete vmRegistry[vmId]; invalidateVmSessions(vmId, 'VM deleted'); return sendJson(res, 200, { success: true, deleted: true }); }
+        broadcastSse('snapshot', getDerivedSnapshot());
+        return sendJson(res, 200, { success: true, vm: getDerivedVm(vmId), status: meta.status });
+      }
+
+      try {
+        const opState = ['start', 'restart', 'recreate'].includes(action) ? 'starting' : ['stop', 'delete'].includes(action) ? 'stopping' : null;
+        if (opState) {
+          dockerProvider.inFlightOps.set(vmId, opState);
+          broadcastSse('snapshot', getDerivedSnapshot());
+        }
+        try {
+          const existing = await dockerProvider.findContainerByVmId(vmId);
+          if (action === 'start') {
+            if (!existing) return sendJson(res, 409, makeError('container_missing', 'Container not found. Use recreate.'));
+            await dockerProvider.startContainer(existing.id);
+          } else if (action === 'stop') {
+            dockerProvider.gracefulStopIds.add(vmId);
+            if (existing) {
+              dockerProvider.gracefulStopIds.add(existing.id);
+              await dockerProvider.stopContainer(existing.id);
+            }
+            invalidateVmSessions(vmId, 'VM stopped');
+          } else if (action === 'restart') {
+            if (!existing) return sendJson(res, 409, makeError('container_missing', 'Container not found. Use recreate.'));
+            await dockerProvider.restartContainer(existing.id);
+          } else if (action === 'recreate') {
+            if (existing) await dockerProvider.removeContainer(existing.id);
+            const created = await dockerProvider.createContainer(meta);
+            await dockerProvider.startContainer(created.id);
+          } else if (action === 'delete') {
+            if (existing) await dockerProvider.removeContainer(existing.id);
+            delete vmRegistry[vmId];
+            invalidateVmSessions(vmId, 'VM deleted');
+            await dockerProvider.reconcile();
+            return sendJson(res, 200, { success: true, deleted: true });
+          }
+          await dockerProvider.reconcile();
+          const updated = getDerivedVm(vmId);
+          recordAudit(`vm.${action}`, meta.name, 'student', `Docker status: ${updated?.status}`);
+          return sendJson(res, 200, { success: true, vm: updated, status: updated?.status || 'unknown', statusSource: 'docker', statusUpdatedAt: updated?.statusUpdatedAt });
+        } finally {
+          dockerProvider.inFlightOps.delete(vmId);
+        }
+      } catch (e) {
+        return sendJson(res, 502, makeError('docker_error', e.message || 'Docker operation failed'));
+      }
+    });
   }
 
   // --- PART B: VM MANAGEMENT, QUOTA LIMITS & APPROVAL WORKFLOW ENDPOINTS ---
 
-  // GET /api/vms - List VMs
+  // GET /api/vms - List VMs (derived from Docker in real mode)
   if (pathname === '/api/vms' && req.method === 'GET') {
-    const list = Object.values(vmRegistry);
-    return sendJson(res, 200, list);
+    if (!IS_DEMO_MODE) {
+      return dockerProvider.reconcile().then(() => sendJson(res, 200, getDerivedSnapshot()));
+    }
+    return sendJson(res, 200, getDerivedSnapshot());
+  }
+
+  // GET /api/vms/:id - Single VM status read from Docker
+  const vmGetMatch = pathname.match(/^\/api\/vms\/([^/]+)$/);
+  if (vmGetMatch && req.method === 'GET') {
+    const vmId = vmGetMatch[1];
+    if (!vmRegistry[vmId]) return sendJson(res, 404, makeError('not_found', 'VM not found'));
+    if (!IS_DEMO_MODE) {
+      return dockerProvider.reconcile().then(() => {
+        const snap = getDerivedSnapshot();
+        const vm = snap.vms.find((v) => v.id === vmId);
+        return sendJson(res, 200, { vm, statusUpdatedAt: snap.statusUpdatedAt, statusSource: snap.statusSource, stale: snap.stale });
+      });
+    }
+    const snap = getDerivedSnapshot();
+    return sendJson(res, 200, { vm: snap.vms.find((v) => v.id === vmId), statusUpdatedAt: snap.statusUpdatedAt, statusSource: snap.statusSource, stale: false });
   }
 
   // POST /api/vms - Create VM with Concurrency Mutex & Quota Enforcement (B1, B2)
@@ -543,26 +692,50 @@ const server = http.createServer((req, res) => {
           grant.fulfilledAt = new Date().toISOString();
         }
 
-        const newId = `vm-${Date.now()}`;
+        const newId = crypto.randomUUID();
+        const shortId = newId.replace(/-/g, '').slice(0, 10);
+        const perVmPassword = crypto.randomBytes(21).toString('base64url');
         const newVm = {
           id: newId,
           name: parsed.data.name,
           os: parsed.data.os,
+          catalogId: parsed.data.os === 'kali' ? 'kali-2024.3' : parsed.data.os,
+          containerName: `ptaas-vm-${shortId}`,
+          volumeName: `ptaas-vol-${shortId}`,
           vcpu: parsed.data.vcpu || 2,
           ram: parsed.data.ram || 4,
           disk: parsed.data.disk || 30,
-          ip: `10.10.1.${40 + Object.keys(vmRegistry).length}`,
-          status: 'running',
+          ip: IS_DEMO_MODE ? `10.10.1.${40 + Object.keys(vmRegistry).length}` : '',
+          ...(IS_DEMO_MODE ? { status: 'running' } : {}),
           protocol: 'rdp',
-          vncPort: 5900 + Object.keys(vmRegistry).length,
-          rdpPort: 3389 + Object.keys(vmRegistry).length,
+          vncPort: 5901,
+          rdpPort: 3389,
           sshPort: 2222,
           tenant: parsed.data.cohort || 'CS-401',
-          owner: studentId
+          owner: studentId,
+          createdAt: new Date().toISOString()
         };
 
         vmRegistry[newId] = newVm;
-        recordAudit('vm.create', newVm.name, studentId, `Provisioned VM ${newVm.name} (${newVm.os}, ${newVm.vcpu} vCPU, ${newVm.ram}GB RAM)`);
+        vmSecrets.set(newId, perVmPassword);
+        if (!IS_DEMO_MODE) {
+          dockerProvider.createContainer({ ...newVm, password: perVmPassword })
+            .then((c) => dockerProvider.startContainer(c.id))
+            .then(() => dockerProvider.reconcile())
+            .then(() => {
+              const derived = getDerivedVm(newId);
+              recordAudit('vm.create.succeeded', newVm.name, studentId, `Provisioned isolated container ${newVm.containerName} and volume ${newVm.volumeName}`);
+              return sendJson(res, 201, derived || newVm);
+            })
+            .catch((e) => {
+              delete vmRegistry[newId];
+              vmSecrets.delete(newId);
+              recordAudit('vm.create.failed', newVm.name, studentId, e.message || 'Failed to create container');
+              return sendJson(res, 502, makeError('docker_error', e.message || 'Failed to create container'));
+            });
+          return;
+        }
+        recordAudit('vm.create', newVm.name, studentId, `Provisioned demo VM ${newVm.name}`);
         return sendJson(res, 201, newVm);
       } finally {
         activeCreationLocks.delete(lockKey);
@@ -577,9 +750,23 @@ const server = http.createServer((req, res) => {
     const vm = vmRegistry[vmId];
     if (!vm) return sendJson(res, 404, makeError('not_found', 'VM not found'));
 
-    delete vmRegistry[vmId];
-    recordAudit('vm.delete', vm.name, vm.owner, `Deleted VM and recycled quota slot. Remaining: ${getStudentActiveVmCount(vm.owner)}/${getStudentLimit(vm.owner)}`);
-    return sendJson(res, 200, { success: true, recycledSlot: true, activeCount: getStudentActiveVmCount(vm.owner) });
+    const finishDelete = () => {
+      delete vmRegistry[vmId];
+      vmSecrets.delete(vmId);
+      invalidateVmSessions(vmId, 'VM deleted');
+      recordAudit('vm.delete', vm.name, vm.owner, `Deleted VM, container, and volume. Remaining: ${getStudentActiveVmCount(vm.owner)}/${getStudentLimit(vm.owner)}`);
+      return sendJson(res, 200, { success: true, recycledSlot: true, activeCount: getStudentActiveVmCount(vm.owner) });
+    };
+
+    if (!IS_DEMO_MODE) {
+      return dockerProvider.findContainerByVmId(vmId)
+        .then((c) => (c ? dockerProvider.removeContainer(c.id) : true))
+        .then(() => (vm.volumeName ? dockerProvider.removeVolume(vm.volumeName) : true))
+        .then(() => dockerProvider.reconcile())
+        .then(finishDelete)
+        .catch((e) => sendJson(res, 502, makeError('docker_error', e.message || 'Failed to remove container')));
+    }
+    return finishDelete();
   }
 
   // GET /api/vm-requests - List VM Approval Requests (B3, B4, B5)
@@ -706,7 +893,7 @@ const server = http.createServer((req, res) => {
           ram: specs.ram || request.requestedSpecs.ram,
           disk: specs.disk || request.requestedSpecs.disk,
           ip: `10.10.1.${40 + Object.keys(vmRegistry).length}`,
-          status: 'running',
+          ...(IS_DEMO_MODE ? { status: 'running' } : {}),
           protocol: 'rdp',
           vncPort: 5900 + Object.keys(vmRegistry).length,
           rdpPort: 3389 + Object.keys(vmRegistry).length,
@@ -715,6 +902,12 @@ const server = http.createServer((req, res) => {
           owner: request.studentId
         };
         vmRegistry[newId] = newVm;
+        if (!IS_DEMO_MODE && dockerProvider) {
+          dockerProvider.createContainer(newVm)
+            .then((c) => dockerProvider.startContainer(c.id))
+            .then(() => dockerProvider.reconcile())
+            .catch(() => {});
+        }
         request.status = 'fulfilled';
         request.createdVmId = newId;
         request.fulfilledAt = new Date().toISOString();
@@ -884,13 +1077,20 @@ function handleDesktopUpgrade(req, socket, head, urlObj) {
     } catch {}
   };
 
-  // Check token validity
-  if (!tokenData) {
+  // Check token validity and verify VM is currently running
+  if (!tokenData || !activeSessions.has(token)) {
     // Guacamole instruction: error 514 (SERVER_ERROR / EXPIRED)
     sendWs('10.error,23.Session token expired.,3.514;');
     setTimeout(() => socket.destroy(), 500);
     return;
   }
+  const derivedDesktopVm = getDerivedVm(tokenData.vmId);
+  if (!derivedDesktopVm || derivedDesktopVm.status !== 'running') {
+    sendWs('10.error,11.VM stopped.,3.514;');
+    setTimeout(() => socket.destroy(), 500);
+    return;
+  }
+  const unregisterDesktopSocket = registerVmSocket(tokenData.vmId, { socket, sendWs, kind: 'desktop' });
 
   // Attempt connection to real guacd on port 4822
   const guacdClient = net.createConnection({ host: GUACD_HOST, port: GUACD_PORT }, () => {
@@ -979,6 +1179,7 @@ function handleDesktopUpgrade(req, socket, head, urlObj) {
   });
 
   socket.on('close', () => {
+    unregisterDesktopSocket();
     if (!guacdClient.destroyed) guacdClient.destroy();
   });
 }
@@ -1036,16 +1237,29 @@ function handleTerminalUpgrade(req, socket, head, urlObj) {
     return;
   }
 
-  const vm = vmRegistry[tokenData.vmId];
-  if (!vm || vm.status !== 'running') {
+  const vm = getDerivedVm(tokenData.vmId);
+  if (!vm || vm.status !== 'running' || !activeSessions.has(token)) {
     // A1: If VM not running, output clear error and close. NEVER fall back to local shell!
     sendWs('\r\n\x1b[1;31m[Gateway unavailable / VM not running]\x1b[0m\r\n\x1b[90mThe virtual machine is not running. Please start the VM to open an interactive terminal.\x1b[0m\r\n');
     setTimeout(() => socket.destroy(), 1500);
     return;
   }
+  const unregisterTerminalSocket = registerVmSocket(tokenData.vmId, { socket, sendWs, kind: 'terminal' });
 
-  const targetHost = vm.sshHost || '127.0.0.1';
-  const targetPort = vm.sshPort || (vm.name === 'ubuntu-dev-01' ? 2223 : 2222);
+  // Resolve target container IP from Docker by ptaas.vm-id label (never fixed host ports or shared passwords in real mode)
+  const targetHost = !IS_DEMO_MODE
+    ? (vm.ip || vm.containerName)
+    : (vm.sshHost || '127.0.0.1');
+  const targetPort = vm.sshPort || 2222;
+  const targetPassword = !IS_DEMO_MODE
+    ? vmSecrets.get(tokenData.vmId)
+    : 'student123';
+
+  if (!targetHost || !targetPassword) {
+    sendWs('\r\n\x1b[1;31m[Gateway Error] Target container IP or per-VM credentials unavailable.\x1b[0m\r\n');
+    setTimeout(() => socket.destroy(), 1000);
+    return;
+  }
 
   const sshClient = new ssh2.Client();
   let sshStream = null;
@@ -1112,7 +1326,7 @@ function handleTerminalUpgrade(req, socket, head, urlObj) {
     host: targetHost,
     port: targetPort,
     username: 'student',
-    password: 'student123',
+    password: targetPassword,
     readyTimeout: 10000
   });
 
@@ -1189,6 +1403,7 @@ function handleTerminalUpgrade(req, socket, head, urlObj) {
   });
 
   socket.on('close', () => {
+    unregisterTerminalSocket();
     if (sshClient) sshClient.end();
   });
 }

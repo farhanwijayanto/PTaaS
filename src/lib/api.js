@@ -1,13 +1,20 @@
-// API layer. Pages only call these functions, never the mock db directly.
-// Each call has simulated latency so loading states are real. Swap the bodies for fetch() later.
-import { vmDb, vmRequestDb, policyDb, userVmLimitDb, persistVms, mergeServerVms } from '../mock/vms.js';
+// API layer. Pages call these functions or vm-store.js directly.
+import { vmRequestDb, policyDb, userVmLimitDb } from '../mock/vms.js';
+import {
+  getVisibleVms,
+  refreshVms,
+  performVmAction,
+  createVmInStore,
+  cancelVmCreation,
+  cleanupOrphanContainer,
+} from './vm-store.js';
 import { auditDb, logEvent } from '../mock/audit.js';
 import { metricsDb } from '../mock/metrics.js';
 import { users, userById, cohorts, persistUsers, upsertUser, replaceUsersFromServer } from '../mock/users.js';
 import { useAuth, sha256Hex } from './auth.js';
 import { emit } from './events.js';
 
-const wait = (ms = 300) => new Promise((resolve) => setTimeout(resolve, ms + Math.random() * 200));
+const wait = (ms = 200) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function call(fn) {
   await wait();
@@ -20,185 +27,55 @@ function forbidden() {
   return err;
 }
 
-function visibleVms() {
-  const { user, tenant } = useAuth();
-  if (!user) throw forbidden();
-  let list = vmDb;
-  if (user.role === 'student') list = list.filter((vm) => vm.owner === user.id);
-  else if (user.role === 'instructor') list = list.filter((vm) => user.cohorts.includes(vm.tenant));
-  if (tenant && tenant !== 'all') list = list.filter((vm) => vm.tenant === tenant);
-  return list.map((vm) => ({ ...vm, ownerName: userById(vm.owner)?.name ?? '—' }));
-}
-
-function findManageable(id) {
-  const { user } = useAuth();
-  const vm = vmDb.find((v) => v.id === id);
-  if (!vm) throw new Error('VM not found');
-  const allowed =
-    user?.role === 'admin' ||
-    (user?.role === 'instructor' && user.cohorts.includes(vm.tenant)) ||
-    vm.owner === user?.id;
-  if (!allowed) throw forbidden();
-  return vm;
-}
-
 export const api = {
   vms: {
-    list: async () => {
-      try {
-        const res = await fetch('/api/vms', { credentials: 'same-origin' });
-        if (res.ok) {
-          const data = await res.json();
-          if (Array.isArray(data?.vms)) mergeServerVms(data.vms);
-        }
-      } catch { /* fallback to local store */ }
-      return call(() => visibleVms());
+    list: async ({ force = false } = {}) => {
+      await refreshVms({ force, silent: true });
+      return getVisibleVms();
     },
-    action: (id, action) =>
-      call(() => {
-        const vm = findManageable(id);
-        switch (action) {
-          case 'start':
-            vm.status = 'running';
-            vm.idleSeconds = 3600;
-            logEvent('VM_START', vm.name);
-            break;
-          case 'stop':
-            vm.status = 'stopped';
-            logEvent('VM_STOP', vm.name);
-            break;
-          case 'restart':
-            vm.status = 'restarting';
-            logEvent('VM_RESTART', vm.name);
-            setTimeout(() => {
-              vm.status = 'running';
-              vm.idleSeconds = 3600;
-              persistVms();
-              emit('vms:changed');
-            }, 1800);
-            break;
-          case 'reset':
-            vm.idleSeconds = 3600;
-            break;
-          case 'delete':
-            vmDb.splice(vmDb.indexOf(vm), 1);
-            logEvent('VM_DELETE', vm.name);
-            break;
-          default:
-            throw new Error(`Unknown action: ${action}`);
-        }
-        persistVms();
-        emit('vms:changed');
-        return true;
-      }),
+    action: async (id, action) => {
+      const result = await performVmAction(id, action);
+      logEvent(`VM_${String(action).toUpperCase()}`, id);
+      return result;
+    },
     create: async (data) => {
       const { user } = useAuth();
       if (!user) throw forbidden();
 
-      const requestedOs = (data.os || 'kali').toLowerCase();
-      if (requestedOs !== 'kali') {
-        throw new Error('Saat ini hanya image Kali Linux yang tersedia untuk pembuatan VM baru.');
-      }
-
-      const studentId = user.id;
-      const activeStatuses = ['creating', 'running', 'stopped', 'error', 'restarting'];
-      const activeCount = vmDb.filter((v) => v.owner === studentId && activeStatuses.includes(v.status)).length;
-      const limit = userVmLimitDb.get(studentId) || user.maxSelfServiceVms || policyDb.maxSelfServiceVms;
-
-      if (user.role === 'student' && activeCount >= limit) {
-        if (!data.grantId) {
-          const err = new Error(`Maximum self-service VM limit (${limit}) reached. Request approval for additional VMs.`);
-          err.code = 'vm_limit_reached';
-          err.limit = limit;
-          err.current = activeCount;
-          err.canRequest = true;
-          throw err;
-        }
-
-        const grant = vmRequestDb.find((r) => r.grantId === data.grantId && r.studentId === studentId);
-        if (!grant || grant.status !== 'approved') {
-          const err = new Error('Invalid or already fulfilled approval grant token');
-          err.code = 'invalid_grant';
-          throw err;
-        }
-        if (grant.approvalExpiresAt && new Date(grant.approvalExpiresAt).getTime() < Date.now()) {
-          grant.status = 'expired';
-          const err = new Error('Approval grant has expired');
-          err.code = 'grant_expired';
-          throw err;
-        }
-
-        grant.status = 'fulfilled';
-        grant.fulfilledAt = new Date().toISOString();
-      }
-
-      let serverVm = null;
-      try {
-        const res = await fetch('/api/vms', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'same-origin',
-          body: JSON.stringify({
-            name: data.name,
-            os: 'kali',
-            vcpu: Number(data.vcpu) || 2,
-            ram: Number(data.ram) || 4,
-            disk: Number(data.disk) || 30,
-            vpc: data.vpc || 'vpc-cs401-01',
-            cohort: data.cohort || user.cohort || (user.cohorts ? user.cohorts[0] : 'CS-401')
-          })
-        });
-        const payload = await res.json().catch(() => ({}));
-        if (!res.ok) {
-          const err = new Error(payload?.error || 'Gagal membuat VM');
-          if (payload?.code) err.code = payload.code;
-          throw err;
-        }
-        serverVm = payload?.vm || null;
-      } catch (err) {
-        if (err?.code === 'vm_limit_reached' || err?.message?.includes('Kali Linux') || err?.message?.includes('Provisioner')) {
-          throw err;
-        }
-      }
-
-      const newVm = serverVm || {
-        id: `vm-${Date.now()}`,
-        name: data.name || `kali-lab-${Date.now().toString().slice(-4)}`,
-        os: 'kali',
+      const newVm = await createVmInStore({
+        name: data.name,
+        imageId: data.imageId || 'kali-2024.3',
+        os: data.os || 'kali',
         vcpu: Number(data.vcpu) || 2,
         ram: Number(data.ram) || 4,
         disk: Number(data.disk) || 30,
-        ip: `10.10.1.${40 + vmDb.length}`,
         vpc: data.vpc || 'vpc-cs401-01',
-        status: 'running',
-        idleSeconds: 3600,
-        owner: studentId,
-        tenant: data.cohort || user.cohort || (user.cohorts ? user.cohorts[0] : 'CS-401'),
-        rdpHost: 'kali-lab-01'
-      };
+        cohort: data.cohort || user.cohort || (user.cohorts ? user.cohorts[0] : 'CS-401'),
+        grantId: data.grantId,
+        idempotencyKey: data.idempotencyKey,
+        restartPolicy: data.restartPolicy,
+      });
 
-      const existingIdx = vmDb.findIndex((v) => v.id === newVm.id);
-      if (existingIdx >= 0) vmDb[existingIdx] = newVm;
-      else vmDb.push(newVm);
-      persistVms();
       logEvent('VM_CREATE', newVm.name);
-      emit('vms:changed');
       return newVm;
     },
-    getQuota: (studentId) =>
-      call(() => {
-        const { user } = useAuth();
-        const targetId = studentId || user?.id;
-        const activeStatuses = ['creating', 'running', 'stopped', 'error', 'restarting'];
-        const activeCount = vmDb.filter((v) => v.owner === targetId && activeStatuses.includes(v.status)).length;
-        const limit = userVmLimitDb.get(targetId) || policyDb.maxSelfServiceVms;
-        return {
-          used: activeCount,
-          limit,
-          remaining: Math.max(0, limit - activeCount),
-          isAtLimit: activeCount >= limit
-        };
-      })
+    cancelCreation: async (vmId) => cancelVmCreation(vmId),
+    cleanupOrphan: async (containerId) => {
+      return cleanupOrphanContainer(containerId);
+    },
+    getQuota: async (studentId) => {
+      const { user } = useAuth();
+      const targetId = studentId || user?.id;
+      const list = getVisibleVms();
+      const activeCount = list.filter((v) => v.owner === targetId).length;
+      const limit = userVmLimitDb.get(targetId) || user?.maxSelfServiceVms || policyDb.maxSelfServiceVms;
+      return {
+        used: activeCount,
+        limit,
+        remaining: Math.max(0, limit - activeCount),
+        isAtLimit: activeCount >= limit
+      };
+    }
   },
   metrics: () => call(() => metricsDb),
   activity: () =>
@@ -569,27 +446,17 @@ export const api = {
         // Auto-provision VM if enabled by policy
         if (policyDb.autoProvisionOnApproval) {
           const specs = req.approvedSpecs || req.requestedSpecs;
-          const newId = `vm-${Date.now()}`;
-          const newVm = {
-            id: newId,
+          req.status = 'fulfilled';
+          req.fulfilledAt = new Date().toISOString();
+          void createVmInStore({
             name: specs.name || req.requestedSpecs.name,
             os: specs.os || req.requestedSpecs.os,
             vcpu: specs.vcpu || req.requestedSpecs.vcpu,
             ram: specs.ram || req.requestedSpecs.ram,
             disk: specs.disk || req.requestedSpecs.disk,
-            ip: `10.10.1.${40 + vmDb.length}`,
-            vpc: 'vpc-cs401-01',
-            status: 'running',
-            idleSeconds: 3600,
-            owner: req.studentId,
-            tenant: req.cohort
-          };
-          vmDb.push(newVm);
-          req.status = 'fulfilled';
-          req.createdVmId = newId;
-          req.fulfilledAt = new Date().toISOString();
-          logEvent('VM_REQUEST_AUTO_PROVISION', newVm.name);
-          emit('vms:changed');
+            cohort: req.cohort,
+          }).catch(() => {});
+          logEvent('VM_REQUEST_AUTO_PROVISION', specs.name || req.requestedSpecs.name);
         } else {
           logEvent('VM_REQUEST_APPROVE', req.requestedSpecs.name);
         }
@@ -637,17 +504,53 @@ export const api = {
       })
   },
 
+  images: {
+    health: async () => {
+      const res = await fetch('/api/images/health', { credentials: 'same-origin', cache: 'no-store' });
+      if (!res.ok) throw new Error('Failed to check image readiness');
+      return res.json();
+    },
+    prepare: async (imageId) => {
+      const res = await fetch('/api/images/prepare', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ imageId }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(payload?.error || 'Failed to prepare image');
+      return payload;
+    }
+  },
+
   policies: {
-    get: () => call(() => ({ ...policyDb })),
-    update: (updates) =>
-      call(() => {
-        const { user } = useAuth();
-        if (user?.role !== 'admin') throw forbidden();
-        Object.assign(policyDb, updates);
-        logEvent('POLICY_UPDATE', `maxVms=${policyDb.maxSelfServiceVms}`);
-        emit('policies:changed');
-        return { ...policyDb };
-      }),
+    get: async () => {
+      try {
+        const res = await fetch('/api/policies', { credentials: 'same-origin', cache: 'no-store' });
+        if (res.ok) {
+          const data = await res.json();
+          Object.assign(policyDb, data);
+          return data;
+        }
+      } catch { /* fallback below */ }
+      return { ...policyDb };
+    },
+    update: async (updates) => {
+      const { user } = useAuth();
+      if (user?.role !== 'admin') throw forbidden();
+      const res = await fetch('/api/policies', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify(updates),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || 'Failed to update policies');
+      Object.assign(policyDb, data);
+      logEvent('POLICY_UPDATE', `maxVms=${policyDb.maxSelfServiceVms}`);
+      emit('policies:changed');
+      return data;
+    },
     setUserLimit: (userId, limit) =>
       call(() => {
         const { user } = useAuth();

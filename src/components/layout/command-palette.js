@@ -4,19 +4,34 @@ import { useAuth } from '../../lib/auth.js';
 import { toggleTheme } from '../../lib/theme.js';
 import { navigate } from '../../lib/router.js';
 import { flatNav } from '../../app/nav.js';
+import { getVisibleVms } from '../../lib/vm-store.js';
 import { mountOverlay } from '../ui/overlay.js';
 import { closeMenus } from '../ui/dropdown.js';
 
 let current = null;
 
-// Ctrl/Cmd+K. Lists pages the current role can reach, plus a few actions.
+// Ctrl/Cmd+K. Lists pages the current role can reach, live VMs from vm-store, plus quick actions.
 export function openCommandPalette() {
   closeMenus();
   if (current) { current.close(); return; }
   const { role } = useAuth();
 
+  const vmCommands = getVisibleVms().map((vm) => {
+    const running = vm.status === 'running' && !vm.stale;
+    const statusLabel = t(`vm.status.${vm.status}`);
+    return {
+      section: 'cmd.vms',
+      label: `${vm.name} (${statusLabel})`,
+      icon: running ? 'monitor' : 'server',
+      badge: statusLabel,
+      running,
+      run: () => navigate(running ? `/desktop?vm=${encodeURIComponent(vm.id)}` : '/vms'),
+    };
+  });
+
   const commands = [
     ...flatNav(role).map((item) => ({ section: 'cmd.goto', label: t(item.label), icon: item.icon, run: () => navigate(item.path) })),
+    ...vmCommands,
     { section: 'cmd.actions', label: t('cmd.newvm'), icon: 'circle-plus', run: () => navigate('/vms/new') },
     { section: 'cmd.actions', label: t('cmd.theme'), icon: 'sun', run: toggleTheme },
     { section: 'cmd.actions', label: t('cmd.lang'), icon: 'languages', run: toggleLang }
@@ -56,7 +71,18 @@ export function openCommandPalette() {
         class: cx('flex h-9 cursor-pointer items-center gap-3 rounded-lg px-3 text-sm', i === activeIndex ? 'bg-raised text-fg' : 'text-muted'),
         onMouseMove: () => { if (activeIndex !== i) { activeIndex = i; render(); } },
         onClick: () => run(cmd)
-      }, icon(cmd.icon, 'w-4 h-4 shrink-0'), h('span', {}, cmd.label)));
+      },
+        icon(cmd.icon, 'w-4 h-4 shrink-0'),
+        h('span', { class: 'truncate flex-1' }, cmd.label),
+        cmd.badge
+          ? h('span', {
+              class: cx(
+                'rounded-full px-2 py-0.5 font-mono text-[10px]',
+                cmd.running ? 'bg-[var(--success-bg)] text-[var(--success-text)]' : 'bg-raised text-muted'
+              )
+            }, cmd.badge)
+          : null
+      ));
     });
     field.setAttribute('aria-activedescendant', `cmd-opt-${activeIndex}`);
     list.querySelector(`#cmd-opt-${activeIndex}`)?.scrollIntoView({ block: 'nearest' });

@@ -3,7 +3,7 @@ import { loadMotionMini, isFinePointer, isReducedMotion } from '../../lib/motion
 
 const base =
   'inline-flex items-center justify-center gap-2 rounded-lg text-sm font-medium whitespace-nowrap select-none cursor-pointer ' +
-  'transition-all duration-150 ease-out disabled:opacity-50 disabled:pointer-events-none ' +
+  'transition-all duration-150 ease-out disabled:opacity-50 disabled:cursor-not-allowed disabled:pointer-events-none ' +
   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-canvas';
 
 const variants = {
@@ -34,7 +34,7 @@ export function button({
   };
   const iconEl = iconName ? icon(iconName, 'w-4 h-4 shrink-0') : null;
   const kids = [iconEl, label && h('span', {}, label)];
-  const el = href
+  const el = href && !disabled
     ? h('a', { ...common, href, 'data-link': true, onClick }, kids)
     : h('button', { ...common, type, disabled, onClick }, kids);
 
