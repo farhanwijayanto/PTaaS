@@ -650,7 +650,7 @@ export class DockerProvider {
   async createContainer(opts: CreateContainerOptions): Promise<DockerContainerSummary> {
     const memoryBytes = Math.max(32, Math.round(opts.ramMb)) * 1024 * 1024;
     const nanoCpus = Math.max(1, Math.round(opts.vcpu || 1)) * 1_000_000_000;
-    const pidsLimit = opts.pidsLimit ?? (Number.parseInt(process.env.PTAAS_PIDS_LIMIT || '256', 10) || 256);
+    const pidsLimit = opts.pidsLimit ?? (Number.parseInt(process.env.PTAAS_PIDS_LIMIT || '1024', 10) || 1024);
     const defaultShmMb = Number.parseInt(process.env.PTAAS_SHM_MB || '512', 10) || 512;
     const shmBytes = Math.min(memoryBytes, Math.max(32, opts.shmSizeMb ?? defaultShmMb) * 1024 * 1024);
 

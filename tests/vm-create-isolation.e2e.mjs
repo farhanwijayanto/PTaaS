@@ -362,7 +362,7 @@ async function main() {
     assert.equal(inspectA.HostConfig.NanoCpus, 1_000_000_000, 'NanoCpus must equal 1 vCPU');
     assert.equal(inspectA.HostConfig.Memory, 2 * 1024 * 1024 * 1024, 'Memory must equal 2 GB');
     assert.equal(inspectA.HostConfig.MemorySwap, inspectA.HostConfig.Memory, 'MemorySwap must equal Memory');
-    assert.equal(inspectA.HostConfig.PidsLimit, 256, 'PidsLimit must be enforced');
+    assert.equal(inspectA.HostConfig.PidsLimit, 1024, 'PidsLimit must be enforced');
     assert.ok(inspectA.HostConfig.ShmSize >= 64 * 1024 * 1024, 'ShmSize must be configured');
     assert.equal(inspectA.HostConfig.Privileged, false, 'Container must be non-privileged');
     assert.ok((inspectA.HostConfig.CapDrop || []).includes('ALL'), 'CapDrop must include ALL');
