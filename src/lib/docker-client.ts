@@ -13,6 +13,8 @@ export interface DockerEndpointConfig {
   socketPath?: string;
   host?: string;
   port?: number;
+  basePath?: string;
+  authKey?: string;
 }
 
 export interface DockerEventMessage {
@@ -97,7 +99,7 @@ export interface DockerEventSubscription {
   close: () => void;
 }
 
-const DOCKER_API_VERSION = 'v1.43';
+const DOCKER_API_VERSION = 'v1.44';
 
 // Documented minimal Linux capabilities required by Kali XFCE + xrdp + sshd + vncserver
 // after dropping ALL capabilities (`CapDrop: ['ALL']`).
@@ -136,6 +138,8 @@ function parseDockerHost(raw: string): DockerEndpointConfig {
       protocol: isHttps ? 'https' : 'http',
       host: parsed.hostname,
       port: Number(parsed.port || (isHttps ? 443 : 80)),
+      basePath: parsed.pathname && parsed.pathname !== '/' ? parsed.pathname : undefined,
+      authKey: process.env.DOCKER_PROXY_KEY || undefined,
     };
   }
   if (trimmed.startsWith('/') || trimmed.startsWith('\\\\.\\pipe\\')) {
@@ -222,6 +226,9 @@ export class DockerProvider {
         ? apiPath
         : `/${DOCKER_API_VERSION}${apiPath.startsWith('/') ? apiPath : `/${apiPath}`}`;
 
+    const basePath = (endpoint.basePath || '').replace(/\/+$/, '');
+    const authHeaders: Record<string, string> = endpoint.authKey ? { 'x-ptaas-key': endpoint.authKey } : {};
+
     if (endpoint.socketPath) {
       return {
         socketPath: endpoint.socketPath,
@@ -235,8 +242,8 @@ export class DockerProvider {
       hostname: endpoint.host || '127.0.0.1',
       port: endpoint.port || 2375,
       method,
-      path: fullPath,
-      headers,
+      path: `${basePath}${fullPath}`,
+      headers: { ...authHeaders, ...headers },
     };
   }
 

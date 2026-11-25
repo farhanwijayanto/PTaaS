@@ -17,9 +17,6 @@ services:
     container_name: ptaas-docker-proxy
     restart: unless-stopped
     privileged: false
-    read_only: true
-    tmpfs:
-      - /run
     ports:
       - "127.0.0.1:2375:2375"
     environment:

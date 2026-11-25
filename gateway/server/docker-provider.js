@@ -7,7 +7,7 @@ const https = require('https');
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
 
-const DOCKER_API_VERSION = 'v1.43';
+const DOCKER_API_VERSION = 'v1.44';
 
 const PTAAS_LABELS = {
   MANAGED: 'ptaas.managed',

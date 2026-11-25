@@ -18,9 +18,6 @@ services:
     container_name: ptaas-docker-proxy
     restart: unless-stopped
     privileged: false
-    read_only: true
-    tmpfs:
-      - /run
     environment:
       - LOG_LEVEL=warning
       - PING=1
