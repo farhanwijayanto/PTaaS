@@ -493,10 +493,11 @@ export class DockerProvider {
     const existing = await this.inspectNetwork(networkName);
     if (existing) return existing;
 
+    const allowInternet = process.env.PTAAS_ALLOW_VM_INTERNET === 'true';
     const payload = {
       Name: networkName,
       Driver: 'bridge',
-      Internal: true, // Strictly blocks external internet egress
+      Internal: !allowInternet, // Blocks external internet egress unless PTAAS_ALLOW_VM_INTERNET=true
       CheckDuplicate: true,
       Options: {
         'com.docker.network.bridge.enable_icc': 'true',

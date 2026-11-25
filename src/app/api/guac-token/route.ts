@@ -57,6 +57,7 @@ export async function GET(req: Request) {
   const requestedVm = (url.searchParams.get('vm') || '').trim();
   const width = clampInt(url.searchParams.get('width'), 480, 3840, 1280);
   const height = clampInt(url.searchParams.get('height'), 320, 2160, 720);
+  const dpi = clampInt(url.searchParams.get('dpi'), 96, 192, 96);
   const fontSize = clampInt(url.searchParams.get('fontSize'), 10, 22, 13);
   const themeKey = (url.searchParams.get('theme') || 'kali').toLowerCase();
   const colorScheme = SSH_COLOR_SCHEMES[themeKey] || SSH_COLOR_SCHEMES.kali;
@@ -141,8 +142,12 @@ export async function GET(req: Request) {
               'ignore-cert': 'true',
               security: 'any',
               'resize-method': 'display-update',
+              'color-depth': '24',
+              'enable-font-smoothing': 'true',
+              'force-lossless': 'true',
               width,
               height,
+              dpi,
             },
           },
           scope: {

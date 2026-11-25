@@ -37,14 +37,17 @@ export default function KaliDesktop() {
         setStatus('Connecting...');
         const params = new URLSearchParams(window.location.search);
         const vmParam = params.get('vm') || '';
+        const dpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
         const rect = displayRef.current?.getBoundingClientRect();
-        const width = Math.max(640, Math.min(1920, Math.round(rect?.width || window.innerWidth)));
-        const height = Math.max(480, Math.min(1080, Math.round(rect?.height || window.innerHeight - 40)));
+        const width = Math.max(800, Math.min(2560, Math.round((rect?.width || window.innerWidth) * dpr)));
+        const height = Math.max(600, Math.min(1440, Math.round((rect?.height || window.innerHeight - 40) * dpr)));
+        const dpi = Math.round(96 * dpr);
 
         const query = new URLSearchParams({
           protocol: 'rdp',
           width: String(width),
           height: String(height),
+          dpi: String(dpi),
         });
         if (vmParam) query.set('vm', vmParam);
 
@@ -104,8 +107,9 @@ export default function KaliDesktop() {
         const sendDisplaySize = () => {
           const container = displayRef.current;
           if (!container || !client) return;
-          const cw = Math.max(640, Math.min(1920, Math.round(container.clientWidth)));
-          const ch = Math.max(480, Math.min(1080, Math.round(container.clientHeight)));
+          const curDpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+          const cw = Math.max(800, Math.min(2560, Math.round(container.clientWidth * curDpr)));
+          const ch = Math.max(600, Math.min(1440, Math.round(container.clientHeight * curDpr)));
           if (cw > 0 && ch > 0) {
             try { client.sendSize(cw, ch); } catch { /* ignore */ }
           }

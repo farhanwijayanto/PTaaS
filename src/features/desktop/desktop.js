@@ -355,15 +355,18 @@ export function DesktopPage({ params, query } = {}) {
     }
 
     try {
+      const dpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
       const rect = displayMount.getBoundingClientRect();
-      const width = Math.max(640, Math.min(1920, Math.round(rect.width || 1280)));
-      const height = Math.max(480, Math.min(1080, Math.round(rect.height || 720)));
+      const width = Math.max(800, Math.min(2560, Math.round((rect.width || 1280) * dpr)));
+      const height = Math.max(600, Math.min(1440, Math.round((rect.height || 720) * dpr)));
+      const dpi = Math.round(96 * dpr);
 
       const queryStr = new URLSearchParams({
         vm: vm.id,
         protocol: 'rdp',
         width: String(width),
-        height: String(height)
+        height: String(height),
+        dpi: String(dpi)
       }).toString();
 
       const res = await fetch(`/api/guac-token?${queryStr}`, { credentials: 'same-origin' });
@@ -428,8 +431,9 @@ export function DesktopPage({ params, query } = {}) {
       let sendSizeTimer = null;
       const sendDisplaySize = () => {
         if (destroyed || activeClient !== client) return;
-        const cw = Math.max(640, Math.min(1920, Math.round(displayMount.clientWidth)));
-        const ch = Math.max(480, Math.min(1080, Math.round(displayMount.clientHeight)));
+        const curDpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+        const cw = Math.max(800, Math.min(2560, Math.round(displayMount.clientWidth * curDpr)));
+        const ch = Math.max(600, Math.min(1440, Math.round(displayMount.clientHeight * curDpr)));
         if (cw > 0 && ch > 0) {
           try { client.sendSize(cw, ch); } catch { /* ignore */ }
         }
