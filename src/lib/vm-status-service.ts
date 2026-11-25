@@ -950,7 +950,7 @@ class VmStatusService {
       return {
         Test: [
           'CMD-SHELL',
-          `nc -z 127.0.0.1 ${catalog.rdpPort} || nc -z 127.0.0.1 ${catalog.sshPort} || nc -z 127.0.0.1 ${catalog.vncPort} || exit 1`,
+          `ss -tln 2>/dev/null | grep -qE ':(${catalog.rdpPort}|${catalog.sshPort}|${catalog.vncPort}) ' || nc -z 127.0.0.1 ${catalog.rdpPort} || nc -z 127.0.0.1 ${catalog.sshPort} || exit 1`,
         ],
         Interval: 5_000_000_000,
         Timeout: 3_000_000_000,
