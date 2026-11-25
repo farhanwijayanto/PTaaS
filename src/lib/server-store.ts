@@ -302,18 +302,22 @@ function getRemoteVmStoreConfig(): { url: string; key: string } | null {
 export async function syncVmRecordsFromRemote(): Promise<void> {
   const cfg = getRemoteVmStoreConfig();
   if (!cfg) return;
-  try {
-    const res = await fetch(cfg.url, {
-      headers: { 'x-ptaas-key': cfg.key },
-      cache: 'no-store',
-    });
-    if (!res.ok) return;
-    const parsed = (await res.json()) as unknown;
-    if (!Array.isArray(parsed)) return;
-    const store = getStore();
-    store.vmRecords = parsed as VmMetadataRecord[];
-  } catch {
-    // Ignore transient remote store read errors
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(cfg.url, {
+        headers: { 'x-ptaas-key': cfg.key },
+        cache: 'no-store',
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) return;
+      const parsed = (await res.json()) as unknown;
+      if (!Array.isArray(parsed)) return;
+      const store = getStore();
+      store.vmRecords = parsed as VmMetadataRecord[];
+      return;
+    } catch {
+      if (attempt === 0) await new Promise((r) => setTimeout(r, 250));
+    }
   }
 }
 

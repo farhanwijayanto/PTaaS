@@ -243,7 +243,8 @@ export class DockerProvider {
       port: endpoint.port || 2375,
       method,
       path: `${basePath}${fullPath}`,
-      headers: { ...authHeaders, ...headers },
+      agent: false,
+      headers: { Connection: 'close', ...authHeaders, ...headers },
     };
   }
 
@@ -295,12 +296,18 @@ export class DockerProvider {
     for (let attempt = 0; attempt < this.endpoints.length; attempt++) {
       const idx = (this.activeEndpointIndex + attempt) % this.endpoints.length;
       const endpoint = this.endpoints[idx];
-      try {
-        const res = await this.rawRequest(endpoint, method, apiPath, body, timeoutMs);
-        this.activeEndpointIndex = idx;
-        return res;
-      } catch (err) {
-        lastError = err;
+      const maxTries = !endpoint.socketPath && method === 'GET' ? 2 : 1;
+      for (let t = 0; t < maxTries; t++) {
+        try {
+          const res = await this.rawRequest(endpoint, method, apiPath, body, timeoutMs);
+          this.activeEndpointIndex = idx;
+          return res;
+        } catch (err) {
+          lastError = err;
+          if (t + 1 < maxTries) {
+            await new Promise((r) => setTimeout(r, 250));
+          }
+        }
       }
     }
     throw lastError instanceof Error ? lastError : new Error('Cannot reach Docker engine');
@@ -308,7 +315,9 @@ export class DockerProvider {
 
   async ping(): Promise<boolean> {
     try {
-      const res = await this.request('GET', '/_ping', undefined, 3000);
+      const ep = this.getCurrentEndpoint();
+      const timeoutMs = ep.socketPath ? 3000 : 8000;
+      const res = await this.request('GET', '/_ping', undefined, timeoutMs);
       return res.statusCode >= 200 && res.statusCode < 300;
     } catch {
       return false;
