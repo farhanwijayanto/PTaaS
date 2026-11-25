@@ -28,6 +28,8 @@ export function DesktopPage({ params, query } = {}) {
   let activeClient = null;
   let activeKeyboard = null;
   let activeResizeCleanup = null;
+  let activeFitDisplay = null;
+  let activeSendSize = null;
   let destroyed = false;
 
   const host = h('div', { class: 'space-y-4 font-sans select-none pb-8' });
@@ -62,11 +64,29 @@ export function DesktopPage({ params, query } = {}) {
     return running[0];
   }
 
+  function applyViewportLayout() {
+    if (isFullscreen) {
+      viewportContainer.style.height = '100dvh';
+      viewportContainer.style.width = '100vw';
+      viewportContainer.style.minHeight = '0';
+      viewportContainer.style.borderRadius = '0';
+      viewportContainer.style.borderWidth = '0';
+    } else {
+      viewportContainer.style.height = 'calc(100dvh - 190px)';
+      viewportContainer.style.width = '100%';
+      viewportContainer.style.minHeight = '540px';
+      viewportContainer.style.borderRadius = '';
+      viewportContainer.style.borderWidth = '';
+    }
+  }
+
   function disconnectClient() {
     if (activeResizeCleanup) {
       activeResizeCleanup();
       activeResizeCleanup = null;
     }
+    activeFitDisplay = null;
+    activeSendSize = null;
     if (activeKeyboard) {
       activeKeyboard.onkeydown = null;
       activeKeyboard.onkeyup = null;
@@ -83,12 +103,22 @@ export function DesktopPage({ params, query } = {}) {
     if (!document.fullscreenElement) {
       viewportContainer.requestFullscreen?.().then(() => {
         isFullscreen = true;
+        applyViewportLayout();
         renderAll();
+        setTimeout(() => {
+          activeFitDisplay?.();
+          activeSendSize?.();
+        }, 120);
       }).catch(() => {});
     } else {
       document.exitFullscreen?.().then(() => {
         isFullscreen = false;
+        applyViewportLayout();
         renderAll();
+        setTimeout(() => {
+          activeFitDisplay?.();
+          activeSendSize?.();
+        }, 120);
       }).catch(() => {});
     }
   }
@@ -105,8 +135,17 @@ export function DesktopPage({ params, query } = {}) {
         icon('monitor', 'w-3.5 h-3.5 text-accent'),
         `${vm.name.toUpperCase()} // LIVE RDP`
       ),
-      h('span', { class: `text-xs font-mono ${toneClass}` },
-        lastError && !status.includes(lastError) ? `Status: ${status} | ${lastError}` : `Status: ${status}`
+      h('div', { class: 'flex items-center gap-3' },
+        h('span', { class: `text-xs font-mono ${toneClass}` },
+          lastError && !status.includes(lastError) ? `Status: ${status} | ${lastError}` : `Status: ${status}`
+        ),
+        button({
+          variant: 'ghost',
+          size: 'xs',
+          icon: isFullscreen ? 'minimize-2' : 'maximize-2',
+          label: isFullscreen ? 'Exit Fullscreen' : 'Fullscreen',
+          onClick: toggleFullscreen
+        })
       )
     );
   }
@@ -317,8 +356,8 @@ export function DesktopPage({ params, query } = {}) {
 
     try {
       const rect = displayMount.getBoundingClientRect();
-      const width = Math.max(800, Math.min(1920, Math.round(rect.width || 1280)));
-      const height = Math.max(600, Math.min(1080, Math.round(rect.height || 720)));
+      const width = Math.max(640, Math.min(1920, Math.round(rect.width || 1280)));
+      const height = Math.max(480, Math.min(1080, Math.round(rect.height || 720)));
 
       const queryStr = new URLSearchParams({
         vm: vm.id,
@@ -378,10 +417,38 @@ export function DesktopPage({ params, query } = {}) {
       const fitDisplay = () => {
         const dw = display.getWidth();
         const dh = display.getHeight();
-        if (dw > 0 && dh > 0 && displayMount.clientWidth > 0 && displayMount.clientHeight > 0) {
-          const scale = Math.min(displayMount.clientWidth / dw, displayMount.clientHeight / dh, 1);
+        const cw = displayMount.clientWidth;
+        const ch = displayMount.clientHeight;
+        if (dw > 0 && dh > 0 && cw > 0 && ch > 0) {
+          const scale = Math.min(cw / dw, ch / dh);
           display.scale(scale);
         }
+      };
+
+      let sendSizeTimer = null;
+      const sendDisplaySize = () => {
+        if (destroyed || activeClient !== client) return;
+        const cw = Math.max(640, Math.min(1920, Math.round(displayMount.clientWidth)));
+        const ch = Math.max(480, Math.min(1080, Math.round(displayMount.clientHeight)));
+        if (cw > 0 && ch > 0) {
+          try { client.sendSize(cw, ch); } catch { /* ignore */ }
+        }
+      };
+      const scheduleSendSize = () => {
+        fitDisplay();
+        if (sendSizeTimer) clearTimeout(sendSizeTimer);
+        sendSizeTimer = setTimeout(() => {
+          sendSizeTimer = null;
+          sendDisplaySize();
+        }, 250);
+      };
+
+      activeFitDisplay = fitDisplay;
+      activeSendSize = sendDisplaySize;
+
+      // Critical: re-scale immediately whenever remote RDP sets or changes its framebuffer size
+      display.onresize = () => {
+        fitDisplay();
       };
 
       client.onstatechange = (state) => {
@@ -390,7 +457,10 @@ export function DesktopPage({ params, query } = {}) {
         status = states[state] || 'Unknown';
         if (state === 3) {
           lastError = null;
-          setTimeout(fitDisplay, 150);
+          setTimeout(() => {
+            fitDisplay();
+            sendDisplaySize();
+          }, 200);
         }
         renderAll();
       };
@@ -430,9 +500,21 @@ export function DesktopPage({ params, query } = {}) {
         client.sendKeyEvent(0, keysym);
       };
 
-      const onResize = () => fitDisplay();
+      const onResize = () => scheduleSendSize();
       window.addEventListener('resize', onResize);
-      activeResizeCleanup = () => window.removeEventListener('resize', onResize);
+      let ro = null;
+      if (typeof ResizeObserver !== 'undefined') {
+        ro = new ResizeObserver(() => scheduleSendSize());
+        ro.observe(displayMount);
+      }
+      activeResizeCleanup = () => {
+        window.removeEventListener('resize', onResize);
+        if (ro) ro.disconnect();
+        if (sendSizeTimer) {
+          clearTimeout(sendSizeTimer);
+          sendSizeTimer = null;
+        }
+      };
 
       client.connect(`token=${encodeURIComponent(data.token)}`);
     } catch (err) {
@@ -445,7 +527,12 @@ export function DesktopPage({ params, query } = {}) {
 
   const onFsChange = () => {
     isFullscreen = !!document.fullscreenElement;
+    applyViewportLayout();
     renderAll();
+    setTimeout(() => {
+      activeFitDisplay?.();
+      activeSendSize?.();
+    }, 150);
   };
   document.addEventListener('fullscreenchange', onFsChange);
 

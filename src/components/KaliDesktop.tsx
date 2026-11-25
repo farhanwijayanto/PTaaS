@@ -4,11 +4,27 @@ import { useEffect, useRef, useState } from 'react';
 import Guacamole from 'guacamole-common-js';
 
 export default function KaliDesktop() {
+  const rootRef = useRef<HTMLDivElement>(null);
   const displayRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState('Connecting...');
   const [lastError, setLastError] = useState<string | null>(null);
   const [vmLabel, setVmLabel] = useState('KALI-LAB-01');
   const [reconnectTick, setReconnectTick] = useState(0);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  useEffect(() => {
+    const onFs = () => setIsFullscreen(Boolean(document.fullscreenElement));
+    document.addEventListener('fullscreenchange', onFs);
+    return () => document.removeEventListener('fullscreenchange', onFs);
+  }, []);
+
+  const toggleFullscreen = () => {
+    if (!document.fullscreenElement) {
+      rootRef.current?.requestFullscreen?.().catch(() => {});
+    } else {
+      document.exitFullscreen?.().catch(() => {});
+    }
+  };
 
   useEffect(() => {
     let client: Guacamole.Client | null = null;
@@ -21,8 +37,9 @@ export default function KaliDesktop() {
         setStatus('Connecting...');
         const params = new URLSearchParams(window.location.search);
         const vmParam = params.get('vm') || '';
-        const width = Math.max(800, Math.min(1920, window.innerWidth));
-        const height = Math.max(600, Math.min(1080, window.innerHeight - 40));
+        const rect = displayRef.current?.getBoundingClientRect();
+        const width = Math.max(640, Math.min(1920, Math.round(rect?.width || window.innerWidth)));
+        const height = Math.max(480, Math.min(1080, Math.round(rect?.height || window.innerHeight - 40)));
 
         const query = new URLSearchParams({
           protocol: 'rdp',
@@ -77,17 +94,43 @@ export default function KaliDesktop() {
           if (!container) return;
           const dw = display.getWidth();
           const dh = display.getHeight();
-          if (dw > 0 && dh > 0) {
-            const scale = Math.min(container.clientWidth / dw, container.clientHeight / dh, 1);
+          if (dw > 0 && dh > 0 && container.clientWidth > 0 && container.clientHeight > 0) {
+            const scale = Math.min(container.clientWidth / dw, container.clientHeight / dh);
             display.scale(scale);
           }
+        };
+
+        let sendSizeTimer: ReturnType<typeof setTimeout> | null = null;
+        const sendDisplaySize = () => {
+          const container = displayRef.current;
+          if (!container || !client) return;
+          const cw = Math.max(640, Math.min(1920, Math.round(container.clientWidth)));
+          const ch = Math.max(480, Math.min(1080, Math.round(container.clientHeight)));
+          if (cw > 0 && ch > 0) {
+            try { client.sendSize(cw, ch); } catch { /* ignore */ }
+          }
+        };
+        const scheduleResize = () => {
+          fitDisplay();
+          if (sendSizeTimer) clearTimeout(sendSizeTimer);
+          sendSizeTimer = setTimeout(() => {
+            sendSizeTimer = null;
+            sendDisplaySize();
+          }, 250);
+        };
+
+        (display as unknown as { onresize?: (w: number, h: number) => void }).onresize = () => {
+          fitDisplay();
         };
 
         client.onstatechange = (state) => {
           const states = ['Idle', 'Connecting...', 'Waiting...', 'Connected', 'Disconnecting...', 'Disconnected'];
           setStatus(states[state] || 'Unknown');
           if (state === 3) {
-            setTimeout(fitDisplay, 150);
+            setTimeout(() => {
+              fitDisplay();
+              sendDisplaySize();
+            }, 200);
           }
         };
 
@@ -117,11 +160,18 @@ export default function KaliDesktop() {
         keyboard.onkeydown = (keysym) => client?.sendKeyEvent(1, keysym);
         keyboard.onkeyup = (keysym) => client?.sendKeyEvent(0, keysym);
 
-        window.addEventListener('resize', fitDisplay);
+        window.addEventListener('resize', scheduleResize);
+        let ro: ResizeObserver | null = null;
+        if (typeof ResizeObserver !== 'undefined' && displayRef.current) {
+          ro = new ResizeObserver(() => scheduleResize());
+          ro.observe(displayRef.current);
+        }
         client.connect(`token=${encodeURIComponent(data.token)}`);
 
         return () => {
-          window.removeEventListener('resize', fitDisplay);
+          window.removeEventListener('resize', scheduleResize);
+          ro?.disconnect();
+          if (sendSizeTimer) clearTimeout(sendSizeTimer);
         };
       } catch (err) {
         if (!cancelled) {
@@ -150,14 +200,14 @@ export default function KaliDesktop() {
   }, [reconnectTick]);
 
   return (
-    <div className="flex flex-col w-full h-screen bg-black text-white">
-      <div className="px-4 py-2 text-xs font-mono border-b border-neutral-800 flex items-center justify-between gap-4">
+    <div ref={rootRef} className="flex flex-col w-full h-screen bg-black text-white">
+      <div className="px-4 py-2 text-xs font-mono border-b border-line flex items-center justify-between gap-4 bg-surface text-fg">
         <div className="flex items-center gap-3">
           <a
             href="/dashboard"
-            className="px-2 py-0.5 rounded border border-neutral-700 hover:bg-neutral-800 text-neutral-300"
+            className="px-2 py-0.5 rounded border border-line hover:bg-raised text-fg cursor-pointer"
           >
-            ← Dashboard
+            Dashboard
           </a>
           <span>{vmLabel} // RDP</span>
         </div>
@@ -168,8 +218,15 @@ export default function KaliDesktop() {
           </span>
           <button
             type="button"
+            onClick={toggleFullscreen}
+            className="px-2 py-0.5 rounded border border-line hover:bg-raised text-fg cursor-pointer"
+          >
+            {isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+          </button>
+          <button
+            type="button"
             onClick={() => setReconnectTick((n) => n + 1)}
-            className="px-2 py-0.5 rounded border border-neutral-700 hover:bg-neutral-800 text-neutral-200 cursor-pointer"
+            className="px-2 py-0.5 rounded border border-line hover:bg-raised text-fg cursor-pointer"
           >
             Reconnect
           </button>
