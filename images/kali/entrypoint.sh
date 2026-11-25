@@ -22,8 +22,14 @@ fi
 
 unset PTAAS_VM_PASSWORD PASSWORD VNC_PW
 
-mkdir -p /var/run/sshd /run/xrdp
-/usr/sbin/sshd -p "${SSH_PORT:-2222}"
+rm -rf /var/run/xrdp/*.pid /run/xrdp/*.pid /var/run/dbus/pid /run/dbus/pid /tmp/.X*-lock /tmp/.X11-unix/* 2>/dev/null || true
+mkdir -p /var/run/sshd /run/xrdp /var/run/xrdp /var/run/dbus
+if [[ -e /etc/ssl/private/ssl-cert-snakeoil.key ]]; then
+  chmod 755 /etc/ssl/private 2>/dev/null || true
+  chgrp xrdp /etc/ssl/private/ssl-cert-snakeoil.key 2>/dev/null || true
+  chmod 640 /etc/ssl/private/ssl-cert-snakeoil.key 2>/dev/null || true
+fi
+/usr/sbin/sshd -p "${SSH_PORT:-2222}" || true
 service xrdp start || true
 su - student -c "vncserver :1 -geometry ${VNC_RESOLUTION:-1920x1080} -depth 24" || true
 
