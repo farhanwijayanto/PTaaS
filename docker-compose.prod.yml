@@ -1,0 +1,127 @@
+# PTaaS Cloud Platform — Production Real-Docker Provisioning Stack
+# Every "+ New VM" click creates a brand-new isolated Kali container (`ptaas-vm-<short-id>`),
+# dedicated volume (`ptaas-vol-<short-id>`), unique runtime password, and internal tenant network.
+#
+# Quick Start on VPS:
+#   1. cp .env.prod.example .env.prod  # fill in strong random secrets & public WS URL
+#   2. docker build -t ptaas/kali:2024.3 images/kali   # build golden image ONCE
+#   3. docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#
+# Expose behind Caddy / Nginx / Cloudflare Tunnel:
+#   - https://ptaas.example.com       -> http://127.0.0.1:3000 (web)
+#   - wss://guac.example.com          -> http://127.0.0.1:8080 (guac-ws)
+#   NEVER expose port 2375 (docker-socket-proxy) publicly!
+
+services:
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    container_name: ptaas-docker-proxy
+    restart: unless-stopped
+    privileged: false
+    read_only: true
+    tmpfs:
+      - /run
+    environment:
+      - LOG_LEVEL=warning
+      - PING=1
+      - EVENTS=1
+      - CONTAINERS=1
+      - VOLUMES=1
+      - NETWORKS=1
+      - IMAGES=1
+      - INFO=1
+      - POST=1
+      - AUTH=0
+      - BUILD=0
+      - COMMIT=0
+      - CONFIGS=0
+      - DISTRIBUTION=0
+      - EXEC=0
+      - GRPC=0
+      - NODES=0
+      - PLUGINS=0
+      - SECRETS=0
+      - SERVICES=0
+      - SESSION=0
+      - SWARM=0
+      - SYSTEM=0
+      - TASKS=0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - ptaas-control
+
+  guacd:
+    image: guacamole/guacd:1.5.5
+    container_name: ptaas-guacd
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 4822 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      - ptaas-control
+
+  guac-ws:
+    build:
+      context: ./gateway/guac-ws
+    container_name: ptaas-guac-ws
+    restart: unless-stopped
+    depends_on:
+      guacd:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      - PORT=8080
+      - GUACD_HOST=ptaas-guacd
+      - GUACD_PORT=4822
+      - GUAC_SECRET_KEY=${GUAC_SECRET_KEY:?Set a 32-char GUAC_SECRET_KEY in .env.prod}
+      - GUAC_LOG_LEVEL=ERRORS
+    networks:
+      - ptaas-control
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_DEMO_MODE: "false"
+        NEXT_PUBLIC_GUAC_WS_URL: ${NEXT_PUBLIC_GUAC_WS_URL:?Set wss://guac.yourdomain.com in .env.prod}
+    container_name: ptaas-web
+    restart: unless-stopped
+    depends_on:
+      - docker-socket-proxy
+      - guac-ws
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DEMO_MODE=false
+      - NEXT_PUBLIC_DEMO_MODE=false
+      - NEXT_PUBLIC_GUAC_WS_URL=${NEXT_PUBLIC_GUAC_WS_URL}
+      - DOCKER_PROXY_URL=http://ptaas-docker-proxy:2375
+      - PTAAS_GATEWAY_CONTAINER=ptaas-guacd
+      - KALI_IMAGE=${KALI_IMAGE:-ptaas/kali:2024.3}
+      - PTAAS_SSH_PORT=${PTAAS_SSH_PORT:-2222}
+      - PTAAS_RDP_PORT=${PTAAS_RDP_PORT:-3389}
+      - PTAAS_VM_STORE_PATH=/app/.data/vms.json
+      - PTAAS_MEMORY_OVERCOMMIT_RATIO=${PTAAS_MEMORY_OVERCOMMIT_RATIO:-2.0}
+      - GUAC_SECRET_KEY=${GUAC_SECRET_KEY:?Set a 32-char GUAC_SECRET_KEY in .env.prod}
+      - VM_SECRET_KEY=${VM_SECRET_KEY:?Set a 32+ char VM_SECRET_KEY in .env.prod}
+      - AUTH_SECRET=${AUTH_SECRET:?Set a 32+ char AUTH_SECRET in .env.prod}
+      - ADMIN_INITIAL_PASSWORD=${ADMIN_INITIAL_PASSWORD:?Set ADMIN_INITIAL_PASSWORD in .env.prod}
+    volumes:
+      - ptaas-web-data:/app/.data
+    networks:
+      - ptaas-control
+
+volumes:
+  ptaas-web-data:
+
+networks:
+  ptaas-control:
+    name: ptaas-control
+    driver: bridge

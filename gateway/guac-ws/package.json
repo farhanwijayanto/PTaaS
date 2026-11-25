@@ -1,0 +1,11 @@
+{
+  "name": "ptaas-guac-ws",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "guacamole-lite": "^1.0.1"
+  }
+}

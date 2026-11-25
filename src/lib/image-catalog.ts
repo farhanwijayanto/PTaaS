@@ -62,8 +62,8 @@ export function getImageCatalog(): ImageCatalogEntry[] {
         'John the Ripper',
       ],
       available: true,
-      sshPort: 2222,
-      rdpPort: 3389,
+      sshPort: Number.parseInt(process.env.PTAAS_SSH_PORT || '', 10) || 2222,
+      rdpPort: Number.parseInt(process.env.PTAAS_RDP_PORT || '', 10) || 3389,
       vncPort: 5901,
     },
     {

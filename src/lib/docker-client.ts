@@ -108,6 +108,8 @@ export const KALI_MINIMAL_CAPS = [
   'DAC_OVERRIDE',
   'FOWNER',
   'NET_BIND_SERVICE',
+  'SYS_CHROOT',
+  'AUDIT_WRITE',
 ] as const;
 
 function parseDockerHost(raw: string): DockerEndpointConfig {
