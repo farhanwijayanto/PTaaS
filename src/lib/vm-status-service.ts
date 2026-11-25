@@ -40,11 +40,13 @@ import {
   deleteVmMetadataRecord,
   findUserById,
   findVmRecordById,
+  flushVmRecordsToRemote,
   getSystemPolicies,
   isServerDemoMode,
   listDemoVms,
   listVmRecords,
   recordServerAudit,
+  syncVmRecordsFromRemote,
   updateVmMetadataIp,
 } from './server-store';
 import type { SessionPayload } from './server-auth';
@@ -474,6 +476,7 @@ class VmStatusService {
 
     this.reconcileInFlight = (async () => {
       try {
+        await syncVmRecordsFromRemote();
         const containers = await this.provider.listManagedContainers(true);
         this.containersById.clear();
         for (const c of containers) {
@@ -930,6 +933,7 @@ class VmStatusService {
     }
     if (opts.deleteRecord) {
       deleteVmMetadataRecord(opts.vmId);
+      await flushVmRecordsToRemote();
     }
     this.inFlightOps.delete(opts.vmId);
     this.buildSnapshotAndNotify(true);
@@ -1460,6 +1464,7 @@ class VmStatusService {
           updateVmMetadataIp(record.id, started.ipAddress);
         }
       }
+      await flushVmRecordsToRemote();
 
       this.dockerReachable = true;
       this.everConnected = true;

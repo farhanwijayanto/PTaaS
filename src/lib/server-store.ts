@@ -288,16 +288,68 @@ function loadRealVmRecordsFromDisk(): VmMetadataRecord[] {
   }
 }
 
+function getRemoteVmStoreConfig(): { url: string; key: string } | null {
+  if (isServerDemoMode()) return null;
+  const proxyUrl = (process.env.DOCKER_PROXY_URL || '').trim();
+  const proxyKey = (process.env.DOCKER_PROXY_KEY || '').trim();
+  if (!proxyUrl || !proxyKey) return null;
+  if (!proxyUrl.startsWith('http://') && !proxyUrl.startsWith('https://')) return null;
+  const idx = proxyUrl.indexOf('/docker-api');
+  if (idx === -1) return null;
+  return { url: `${proxyUrl.slice(0, idx)}/vm-store`, key: proxyKey };
+}
+
+export async function syncVmRecordsFromRemote(): Promise<void> {
+  const cfg = getRemoteVmStoreConfig();
+  if (!cfg) return;
+  try {
+    const res = await fetch(cfg.url, {
+      headers: { 'x-ptaas-key': cfg.key },
+      cache: 'no-store',
+    });
+    if (!res.ok) return;
+    const parsed = (await res.json()) as unknown;
+    if (!Array.isArray(parsed)) return;
+    const store = getStore();
+    store.vmRecords = parsed as VmMetadataRecord[];
+  } catch {
+    // Ignore transient remote store read errors
+  }
+}
+
+export async function flushVmRecordsToRemote(): Promise<void> {
+  await pushVmRecordsToRemote(getStore().vmRecords);
+}
+
+async function pushVmRecordsToRemote(records: VmMetadataRecord[]): Promise<void> {
+  const cfg = getRemoteVmStoreConfig();
+  if (!cfg) return;
+  try {
+    await fetch(cfg.url, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-ptaas-key': cfg.key,
+      },
+      body: JSON.stringify(records),
+    });
+  } catch {
+    // Ignore transient remote store write errors
+  }
+}
+
 function persistRealVmRecordsToDisk(records: VmMetadataRecord[]): void {
   const filePath = getVmStoreFilePath();
-  if (!filePath) return;
-  try {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    // Store metadata only, never runtime status
-    fs.writeFileSync(filePath, JSON.stringify(records, null, 2), 'utf8');
-  } catch {
-    // Ignore disk write errors in read-only environments
+  if (filePath) {
+    try {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      // Store metadata only, never runtime status
+      fs.writeFileSync(filePath, JSON.stringify(records, null, 2), 'utf8');
+    } catch {
+      // Ignore disk write errors in read-only environments
+    }
   }
+  void pushVmRecordsToRemote(records);
 }
 
 export interface SystemPolicies {
