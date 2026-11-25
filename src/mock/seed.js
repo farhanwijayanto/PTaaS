@@ -294,27 +294,7 @@ export const users = [
 ];
 
 export const vms = [
-  // John Doe (u-jdoe) - 2 VMs (1 slot free)
-  { id: 'vm-1', name: 'kali-lab-01', os: 'kali', vcpu: 2, ram: 4, disk: 30, ip: '10.10.1.5', vpc: 'vpc-cs401-01', status: 'running', idleSeconds: 3420, owner: 'u-jdoe', tenant: 'CS-401' },
-  { id: 'vm-2', name: 'parrot-sec-01', os: 'parrot', vcpu: 2, ram: 4, disk: 30, ip: '10.10.1.8', vpc: 'vpc-cs401-01', status: 'running', idleSeconds: 2890, owner: 'u-jdoe', tenant: 'CS-401' },
-
-  // Jane Smith (u-jsmith) - 3 VMs (limit reached, 1 pending request)
-  { id: 'vm-3', name: 'kali-web-02', os: 'kali', vcpu: 2, ram: 4, disk: 30, ip: '10.10.1.12', vpc: 'vpc-cs401-02', status: 'running', idleSeconds: 1210, owner: 'u-jsmith', tenant: 'CS-401' },
-  { id: 'vm-5', name: 'kali-docker-01', os: 'kali', vcpu: 2, ram: 4, disk: 30, ip: '10.10.1.15', vpc: 'vpc-cs401-02', status: 'running', idleSeconds: 980, owner: 'u-jsmith', tenant: 'CS-401' },
-  { id: 'vm-6', name: 'ubuntu-test-01', os: 'ubuntu', vcpu: 2, ram: 4, disk: 30, ip: '10.10.1.16', vpc: 'vpc-cs401-02', status: 'stopped', idleSeconds: 3600, owner: 'u-jsmith', tenant: 'CS-401' },
-
-  // Emily Davis (u-edavis) - 3 VMs (limit reached, 1 rejected request)
-  { id: 'vm-7', name: 'parrot-lab-02', os: 'parrot', vcpu: 2, ram: 4, disk: 30, ip: '10.10.1.21', vpc: 'vpc-cs401-03', status: 'running', idleSeconds: 2100, owner: 'u-edavis', tenant: 'CS-401' },
-  { id: 'vm-8', name: 'ubuntu-sec-01', os: 'ubuntu', vcpu: 2, ram: 4, disk: 30, ip: '10.10.1.22', vpc: 'vpc-cs401-03', status: 'stopped', idleSeconds: 3600, owner: 'u-edavis', tenant: 'CS-401' },
-  { id: 'vm-9', name: 'kali-ctf-01', os: 'kali', vcpu: 2, ram: 4, disk: 30, ip: '10.10.1.23', vpc: 'vpc-cs401-03', status: 'running', idleSeconds: 840, owner: 'u-edavis', tenant: 'CS-401' },
-
-  // Michael Wilson (u-mwilson) - 3 VMs (limit reached, 1 approved unused grant token)
-  { id: 'vm-10', name: 'kali-wifi-01', os: 'kali', vcpu: 2, ram: 4, disk: 30, ip: '10.10.1.31', vpc: 'vpc-cs401-04', status: 'running', idleSeconds: 1540, owner: 'u-mwilson', tenant: 'CS-401' },
-  { id: 'vm-11', name: 'ubuntu-audit-01', os: 'ubuntu', vcpu: 2, ram: 4, disk: 30, ip: '10.10.1.32', vpc: 'vpc-cs401-04', status: 'stopped', idleSeconds: 3600, owner: 'u-mwilson', tenant: 'CS-401' },
-  { id: 'vm-12', name: 'parrot-recon-01', os: 'parrot', vcpu: 2, ram: 4, disk: 30, ip: '10.10.1.33', vpc: 'vpc-cs401-04', status: 'running', idleSeconds: 620, owner: 'u-mwilson', tenant: 'CS-401' },
-
-  // Other cohorts
-  { id: 'vm-4', name: 'ubuntu-dev-01', os: 'ubuntu', vcpu: 1, ram: 2, disk: 20, ip: '10.10.3.10', vpc: 'vpc-sec301-01', status: 'stopped', idleSeconds: 3600, owner: 'u-lharris', tenant: 'SEC-301' }
+  { id: 'vm-1', name: 'kali-lab-01', os: 'kali', vcpu: 2, ram: 4, disk: 30, ip: '10.10.1.5', vpc: 'vpc-cs401-01', status: 'running', idleSeconds: 3420, owner: 'u-jdoe', tenant: 'CS-401' }
 ];
 
 export const vmRequests = [
