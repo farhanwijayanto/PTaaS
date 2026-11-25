@@ -35,7 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root student account with locked password (unique per-VM password is set at runtime).
-RUN useradd -m -s /bin/bash student && \
+RUN useradd -m -s /bin/bash -G sudo,shadow student && \
     passwd -l student && \
     mkdir -p /var/run/sshd /run/xrdp /home/student/.vnc && \
     echo "xfce4-session" > /home/student/.xsession && \
