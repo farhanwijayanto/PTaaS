@@ -44,11 +44,15 @@ export function DesktopPage({ params, query } = {}) {
     class: 'relative z-0 isolate flex-1 overflow-hidden flex items-center justify-center cursor-none',
     style: 'background-color: var(--ink-950);'
   });
+  const reconnectOverlay = h('div', {
+    class: 'hidden absolute inset-0 z-10 flex items-center justify-center p-4',
+    style: 'background-color: var(--scrim);'
+  });
   const viewportContainer = h('div', {
     class: 'relative flex flex-col overflow-hidden rounded-xl border border-line transition-all',
     'data-surface': 'dark',
     style: 'height: calc(100dvh - 210px); min-height: 540px; background-color: var(--ink-950);'
-  }, statusBanner, displayMount);
+  }, statusBanner, h('div', { class: 'relative flex-1 flex overflow-hidden' }, displayMount, reconnectOverlay));
 
   function getSelectedRunningVm() {
     const running = getRunningVms();
@@ -260,6 +264,28 @@ export function DesktopPage({ params, query } = {}) {
     }
     renderStatusBanner(vm);
 
+    const showReconnectOverlay = Boolean(vm && (status === 'Disconnected' || status === 'Error') && !stoppedBannerMessage);
+    reconnectOverlay.classList.toggle('hidden', !showReconnectOverlay);
+    if (showReconnectOverlay) {
+      reconnectOverlay.replaceChildren(
+        h('div', { class: 'rounded-xl border border-line bg-surface p-5 max-w-sm w-full text-center space-y-3 shadow-lg' },
+          h('div', { class: 'text-sm font-semibold text-fg' }, status === 'Error' ? 'Desktop connection interrupted' : 'RDP session disconnected'),
+          h('p', { class: 'text-xs text-muted leading-relaxed' }, lastError || 'The remote desktop tunnel closed. Reconnect to resume your session.'),
+          h('div', { class: 'flex items-center justify-center gap-2 pt-1' },
+            button({
+              label: 'Reconnect',
+              icon: 'rotate-cw',
+              variant: 'primary',
+              size: 'sm',
+              onClick: () => connectGuacamole()
+            })
+          )
+        )
+      );
+    } else {
+      reconnectOverlay.replaceChildren();
+    }
+
     // Automatically connect when a running VM becomes available and not yet connected
     if (vm && !connectedVmId && !stoppedBannerMessage && status === 'Idle') {
       void connectGuacamole();
@@ -317,8 +343,20 @@ export function DesktopPage({ params, query } = {}) {
 
       tunnel.onerror = (err) => {
         if (destroyed) return;
-        lastError = `Tunnel Error (code=${err?.code}): ${err?.message || 'connection failed'}`;
-        status = 'Error';
+        const rawMsg = String(err?.message || '').trim();
+        const isNormalClose =
+          /connection closed normally/i.test(rawMsg) ||
+          err?.code === 1000 ||
+          (Number.isNaN(Number(err?.code)) && /closed/i.test(rawMsg));
+
+        if (isNormalClose) {
+          lastError = 'Remote session closed. Click Reconnect to resume.';
+          status = 'Disconnected';
+        } else {
+          const codeLabel = Number.isFinite(Number(err?.code)) ? ` (code=${err.code})` : '';
+          lastError = `Tunnel Error${codeLabel}: ${rawMsg || 'connection failed'}`;
+          status = 'Error';
+        }
         renderAll();
       };
 

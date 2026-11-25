@@ -32,13 +32,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     sqlmap \
     hydra \
     john \
+    && apt-get purge -y xfce4-screensaver light-locker xscreensaver 2>/dev/null || true \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root student account with locked password (unique per-VM password is set at runtime).
 RUN useradd -m -s /bin/bash student && \
     passwd -l student && \
     mkdir -p /var/run/sshd /run/xrdp /home/student/.vnc && \
-    echo "xfce4-session" > /home/student/.xsession && \
+    printf '%s\n' '#!/bin/sh' 'xset s off -dpms 2>/dev/null || true' 'exec xfce4-session' > /home/student/.xsession && \
+    chmod 755 /home/student/.xsession && \
     sed -i 's/^#Port 22/Port 2222/' /etc/ssh/sshd_config && \
     sed -i 's/^#PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config && \
     sed -i 's/^#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
