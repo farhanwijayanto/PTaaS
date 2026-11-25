@@ -61,14 +61,21 @@ export async function GET(req: Request) {
   const themeKey = (url.searchParams.get('theme') || 'kali').toLowerCase();
   const colorScheme = SSH_COLOR_SCHEMES[themeKey] || SSH_COLOR_SCHEMES.kali;
 
-  if (!requestedVm) {
-    return NextResponse.json({ error: 'VM identifier is required', code: 'vm_required' }, { status: 400 });
+  const service = getVmStatusService();
+  let effectiveVm = requestedVm;
+  if (!effectiveVm) {
+    const snap = await service.getScopedSnapshot(session, false);
+    const firstRunning = snap.vms.find((v) => v.status === 'running');
+    if (firstRunning) {
+      effectiveVm = firstRunning.id;
+    } else {
+      return NextResponse.json({ error: 'VM identifier is required', code: 'vm_required' }, { status: 400 });
+    }
   }
 
-  const service = getVmStatusService();
   let target;
   try {
-    target = await service.resolveTunnelTarget(session, requestedVm);
+    target = await service.resolveTunnelTarget(session, effectiveVm);
   } catch (err) {
     const e = err as Error & { statusCode?: number; code?: string };
     return NextResponse.json(

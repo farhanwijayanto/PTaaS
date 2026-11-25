@@ -1844,12 +1844,14 @@ class VmStatusService {
     if (!derived) return null;
 
     if (isServerDemoMode()) {
+      const rdpPort = Number.parseInt(process.env.GUAC_RDP_PORT || '', 10) || derived.rdpPort || 3389;
+      const sshPort = Number.parseInt(process.env.GUAC_SSH_PORT || '', 10) || 22;
       return {
         vm: derived,
-        host: derived.rdpHost || derived.ip || '10.10.1.5',
-        rdpPort: derived.rdpPort || 3389,
-        sshPort: derived.sshPort || 2222,
-        password: generateStrongVmPassword(24),
+        host: derived.rdpHost || process.env.GUAC_DEFAULT_HOST || derived.ip || 'kali-lab-01',
+        rdpPort,
+        sshPort,
+        password: process.env.GUAC_KALI_PASS || 'student123',
       };
     }
 
